@@ -1,4 +1,4 @@
-#import <UIKit/UIKit.h>
+﻿#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "AxsHoldLaunchConfig.h"
@@ -121,7 +121,6 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
 
 static IMP axs_origRoute = NULL;
 static IMP axs_origSessionFor = NULL;
-static IMP axs_origCloseSession = NULL;
 static __weak id axs_sessionManager = nil;
 static NSTimeInterval axs_lastJumpTime = 0;
 static NSString *axs_lastJumpBundle = nil;
@@ -231,7 +230,7 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Settings side: inject three rows into ScreenCore's split settings "启动" group.
+// Settings side: inject three rows into ScreenCore's split settings "鍚姩" group.
 //
 // ScreenCorePrefs.bundle is loaded lazily when the user opens the page, so the
 // hook on SCSplitSettingsController cannot be installed in %ctor. Instead,
@@ -285,12 +284,12 @@ static NSArray *axs_holdlaunch_injectedSpecifiers_imp(id self, SEL _cmd) {
     SEL setSel = @selector(axs_holdlaunch_writeValue:forSpecifier:);
     SEL getSel = @selector(axs_holdlaunch_readValueForSpecifier:);
 
-    PSSpecifier *enabled = axs_holdlaunch_specifier(@"长按松手触发", self, setSel, getSel);
+    PSSpecifier *enabled = axs_holdlaunch_specifier(@"闀挎寜鏉炬墜瑙﹀彂", self, setSel, getSel);
     [enabled setProperty:AxsHoldLaunchKeyEnabled forKey:@"key"];
     [enabled setProperty:@"PSSwitchCell" forKey:@"cellClass"];
     [enabled setIdentifier:@"axsHoldLaunchEnabledSpecifier"];
 
-    PSSpecifier *threshold = axs_holdlaunch_specifier(@"长按触发时间", self, setSel, getSel);
+    PSSpecifier *threshold = axs_holdlaunch_specifier(@"闀挎寜瑙﹀彂鏃堕棿", self, setSel, getSel);
     [threshold setProperty:AxsHoldLaunchKeyThreshold forKey:@"key"];
     [threshold setProperty:@"PSSliderCell" forKey:@"cellClass"];
     [threshold setProperty:@(0.1) forKey:@"min"];
@@ -298,7 +297,7 @@ static NSArray *axs_holdlaunch_injectedSpecifiers_imp(id self, SEL _cmd) {
     [threshold setProperty:@YES forKey:@"showValue"];
     [threshold setIdentifier:@"axsHoldLaunchThresholdSpecifier"];
 
-    PSSpecifier *reverse = axs_holdlaunch_specifier(@"反转长按动作", self, setSel, getSel);
+    PSSpecifier *reverse = axs_holdlaunch_specifier(@"鍙嶈浆闀挎寜鍔ㄤ綔", self, setSel, getSel);
     [reverse setProperty:AxsHoldLaunchKeyReverse forKey:@"key"];
     [reverse setProperty:@"PSSwitchCell" forKey:@"cellClass"];
     [reverse setIdentifier:@"axsHoldLaunchReverseSpecifier"];
@@ -325,11 +324,11 @@ static void axs_holdlaunch_writeValue_imp(id self, SEL _cmd, id value, PSSpecifi
     }
     NSError *error = nil;
     if (!axs_holdlaunch_writePreference(key, value, &error)) {
-        NSString *message = [NSString stringWithFormat:@"写入设置失败：%@", error.localizedDescription ?: @"未知错误"];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"ARC 长按全屏启动"
+        NSString *message = [NSString stringWithFormat:@"鍐欏叆璁剧疆澶辫触锛?@", error.localizedDescription ?: @"鏈煡閿欒"];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"ARC 闀挎寜鍏ㄥ睆鍚姩"
                                                                        message:message
                                                                 preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"濂? style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];
     }
 }
@@ -348,7 +347,7 @@ static NSArray *axs_specifiers_imp(id self, SEL _cmd) {
         NSString *key = [(PSSpecifier *)specifiers[i] propertyForKey:@"key"];
         if ([key isEqualToString:@"splitSideGestureLaunchMode"]
             || [key isEqualToString:@"splitArcGestureLaunchMode"]) {
-            anchor = i; // keep the last match: the end of the "启动" group
+            anchor = i; // keep the last match: the end of the "鍚姩" group
         }
     }
 
@@ -465,3 +464,4 @@ static void axs_holdlaunch_installSettingsHooks(void) {
         }
     }
 }
+
