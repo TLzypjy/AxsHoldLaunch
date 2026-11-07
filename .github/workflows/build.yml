@@ -94,8 +94,8 @@ jobs:
             DYLIB=$(find "$DEB_DIR" -name "AxsHoldLaunch.dylib" | head -n 1)
             test -n "$DYLIB"
             strings -a "$DYLIB" | grep -E "sc_handleSelectedBundleIdentifier|sc_openTargetIdentifier|HoldPressEnabled|axs.holdlaunch" | sort -u
-            PLIST="$DEB_DIR/Library/MobileSubstrate/DynamicLibraries/AxsHoldLaunch.plist"
-            test -f "$PLIST"
+            PLIST=$(find "$DEB_DIR" -name "AxsHoldLaunch.plist" | head -n 1)
+            test -n "$PLIST"
             echo "--- filter plist ---"
             plutil -p "$PLIST" || cat "$PLIST"
             if ! plutil -p "$PLIST" 2>/dev/null | grep -q "com.apple.springboard"; then
