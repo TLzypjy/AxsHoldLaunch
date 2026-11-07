@@ -80,16 +80,24 @@ static void axs_holdlaunch_updateSelectionAtPoint(id self, SEL _cmd, CGPoint poi
     axs_lastTrackingActivity = axs_holdlaunch_now();
     if ([self respondsToSelector:@selector(selectedBundleIdentifier)]) {
         id bundle = ((id(*)(id, SEL))objc_msgSend)(self, @selector(selectedBundleIdentifier));
+        NSTimeInterval before = axs_arrivalTime;
         axs_holdlaunch_recordArrival(bundle);
+        if (axs_arrivalTime != before && [bundle isKindOfClass:[NSString class]]) {
+            axs_holdlaunch_log(@"arrival(update) bundle=%@ point=(%.0f,%.0f)", bundle, point.x, point.y);
+        }
     }
 }
 
 static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     ((void(*)(id, SEL, id))axs_origSetSelectedBundle)(self, _cmd, bundle);
-    // Ignore programmatic writes far away from any menu tracking session.
-    if (axs_holdlaunch_now() - axs_lastTrackingActivity > 5.0) return;
-    axs_lastTrackingActivity = axs_holdlaunch_now();
+    // No tracking gate: ScreenCore may not route every menu interaction
+    // through sc_updateSelectionAtPoint:, and a stale arrival is only used
+    // when the SAME bundle is selected within the freshness window.
     axs_holdlaunch_recordArrival(bundle);
+    if ([bundle isKindOfClass:[NSString class]] && axs_arrivalTime > 0
+        && [bundle isEqualToString:axs_arrivalBundle]) {
+        axs_holdlaunch_log(@"arrival(set) bundle=%@", bundle);
+    }
 }
 
 static void axs_holdlaunch_handleSelected(id self, SEL _cmd, id bundle, id sourceFrame) {
@@ -114,7 +122,10 @@ static void axs_holdlaunch_handleSelected(id self, SEL _cmd, id bundle, id sourc
 }
 
 static id axs_holdlaunch_openTarget(id self, SEL _cmd, id targetIdentifier, id transitionContext,
-                                    id sourceRect, id gestureProfile, BOOL launchFullscreen) {
+                                    unsigned long sourceRect, unsigned long gestureProfile, BOOL launchFullscreen) {
+    // gestureProfile and presentationSourceRect are passed through bit-exact
+    // as integers: declaring them as id made ARC retain primitive values
+    // (EXC_BAD_ACCESS at objc_retain on the first selection).
     BOOL fullscreen = launchFullscreen;
     if (axs_pendingDwell >= 0.0 && axs_holdlaunch_now() - axs_pendingArmTime <= 3.0) {
         BOOL matches = YES;
@@ -133,7 +144,7 @@ static id axs_holdlaunch_openTarget(id self, SEL _cmd, id targetIdentifier, id t
     }
     axs_pendingDwell = -1.0;
     axs_pendingArmTime = 0;
-    return ((id(*)(id, SEL, id, id, id, id, BOOL))axs_origOpenTarget)(
+    return ((id(*)(id, SEL, id, id, unsigned long, unsigned long, BOOL))axs_origOpenTarget)(
         self, _cmd, targetIdentifier, transitionContext, sourceRect, gestureProfile, fullscreen);
 }
 
@@ -215,7 +226,33 @@ static NSString * const AxsHoldLaunchKeyThreshold = @"HoldPressThreshold";
 static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
 
 static IMP axs_origSpecifiers = NULL;
+static IMP axs_origReadPrefValue = NULL;
+static IMP axs_origSetPrefValue = NULL;
 static BOOL axs_settingsInstalled = NO;
+
+static double axs_holdlaunch_quantizeThreshold(double value) {
+    double v = round(value / 0.05) * 0.05;
+    if (v < 0.2) v = 0.2;
+    if (v > 5.0) v = 5.0;
+    return v;
+}
+
+static id axs_readPreferenceValue_imp(id self, SEL _cmd, id specifier) {
+    id value = ((id(*)(id, SEL, id))axs_origReadPrefValue)(self, _cmd, specifier);
+    NSString *key = [specifier propertyForKey:@"key"];
+    if ([key isEqualToString:AxsHoldLaunchKeyThreshold] && [value isKindOfClass:[NSNumber class]]) {
+        return @(axs_holdlaunch_quantizeThreshold([value doubleValue]));
+    }
+    return value;
+}
+
+static void axs_setPreferenceValue_imp(id self, SEL _cmd, id value, id specifier) {
+    NSString *key = [specifier propertyForKey:@"key"];
+    if ([key isEqualToString:AxsHoldLaunchKeyThreshold] && [value isKindOfClass:[NSNumber class]]) {
+        value = @(axs_holdlaunch_quantizeThreshold([value doubleValue]));
+    }
+    ((void(*)(id, SEL, id, id))axs_origSetPrefValue)(self, _cmd, value, specifier);
+}
 
 // PSSpecifier is resolved at runtime; direct class references would break
 // linking for the SpringBoard slice.
@@ -329,6 +366,29 @@ static void axs_holdlaunch_installSettingsHooks(void) {
     class_addMethod(cls, @selector(axs_holdlaunch_injectedSpecifiers), (IMP)axs_holdlaunch_injectedSpecifiers_imp, "@@:");
     class_addMethod(cls, @selector(axs_holdlaunch_readValueForSpecifier:), (IMP)axs_holdlaunch_readValue_imp, "@@:@");
     class_addMethod(cls, @selector(axs_holdlaunch_writeValue:forSpecifier:), (IMP)axs_holdlaunch_writeValue_imp, "v@:@");
+
+    // Quantize the threshold slider (read = input dialog prefill, write =
+    // slider drags and typed values) so it never shows more than 2 decimals.
+    SEL selRead = @selector(readPreferenceValue:);
+    Method readMethod = class_getInstanceMethod(cls, selRead);
+    if (readMethod) {
+        IMP readOrig = method_getImplementation(readMethod);
+        if (class_addMethod(cls, selRead, (IMP)axs_readPreferenceValue_imp, method_getTypeEncoding(readMethod))) {
+            axs_origReadPrefValue = readOrig;
+        } else {
+            MSHookMessageEx(cls, selRead, (IMP)axs_readPreferenceValue_imp, &axs_origReadPrefValue);
+        }
+    }
+    SEL selWrite = @selector(setPreferenceValue:specifier:);
+    Method writeMethod = class_getInstanceMethod(cls, selWrite);
+    if (writeMethod) {
+        IMP writeOrig = method_getImplementation(writeMethod);
+        if (class_addMethod(cls, selWrite, (IMP)axs_setPreferenceValue_imp, method_getTypeEncoding(writeMethod))) {
+            axs_origSetPrefValue = writeOrig;
+        } else {
+            MSHookMessageEx(cls, selWrite, (IMP)axs_setPreferenceValue_imp, &axs_origSetPrefValue);
+        }
+    }
     axs_settingsInstalled = YES;
     axs_holdlaunch_log(@"settings hooks installed");
 }
