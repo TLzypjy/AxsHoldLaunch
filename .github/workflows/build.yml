@@ -96,9 +96,14 @@ jobs:
             strings -a "$DYLIB" | grep -E "sc_handleSelectedBundleIdentifier|sc_openTargetIdentifier|HoldPressEnabled|axs.holdlaunch" | sort -u
             PLIST="$DEB_DIR/Library/MobileSubstrate/DynamicLibraries/AxsHoldLaunch.plist"
             test -f "$PLIST"
-            plutil -convert xml1 -o - "$PLIST" > "$DEB_DIR/filter.xml"
-            grep -q "com.apple.springboard" "$DEB_DIR/filter.xml"
-            grep -q "com.apple.Preferences" "$DEB_DIR/filter.xml"
+            echo "--- filter plist ---"
+            plutil -p "$PLIST" || cat "$PLIST"
+            if ! plutil -p "$PLIST" 2>/dev/null | grep -q "com.apple.springboard"; then
+              echo "ERROR: springboard missing from filter" && exit 1
+            fi
+            if ! plutil -p "$PLIST" 2>/dev/null | grep -q "com.apple.Preferences"; then
+              echo "ERROR: preferences missing from filter" && exit 1
+            fi
             rm -rf "$DEB_DIR"
             echo "verify ok"
           done
