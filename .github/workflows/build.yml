@@ -80,6 +80,27 @@ jobs:
           echo "=== .deb files ==="
           find ./packages -name "*.deb" -type f
 
+      - name: Verify Package
+        run: |
+          set -euo pipefail
+          for deb in ./packages/*.deb; do
+            echo "=== dpkg-deb -I $(basename "$deb") ==="
+            dpkg-deb -I "$deb"
+            echo "=== dpkg-deb -c $(basename "$deb") ==="
+            dpkg-deb -c "$deb"
+            echo "=== dylib strings check ==="
+            DEB_DIR="$(mktemp -d)"
+            dpkg-deb -x "$deb" "$DEB_DIR"
+            DYLIB=$(find "$DEB_DIR" -name "AxsHoldLaunch.dylib" | head -n 1)
+            test -n "$DYLIB"
+            strings -a "$DYLIB" | grep -E "sc_handleSelectedBundleIdentifier|sc_openTargetIdentifier|HoldPressEnabled|axs.holdlaunch|jbroot" | sort -u
+            test -f "$DEB_DIR/Library/MobileSubstrate/DynamicLibraries/AxsHoldLaunch.plist"
+            grep -q "com.apple.springboard" "$DEB_DIR/Library/MobileSubstrate/DynamicLibraries/AxsHoldLaunch.plist"
+            grep -q "com.apple.Preferences" "$DEB_DIR/Library/MobileSubstrate/DynamicLibraries/AxsHoldLaunch.plist"
+            rm -rf "$DEB_DIR"
+            echo "verify ok"
+          done
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
