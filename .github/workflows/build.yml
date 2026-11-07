@@ -108,6 +108,25 @@ jobs:
             echo "verify ok"
           done
 
+      - name: Collect Repack Files
+        run: |
+          set -euo pipefail
+          mkdir -p ./repack
+          DEB=$(ls ./packages/*arm64e*.deb 2>/dev/null | head -n 1)
+          if [ -z "$DEB" ]; then DEB=$(ls ./packages/*.deb | head -n 1); fi
+          EXTRACT="$(mktemp -d)"
+          dpkg-deb -x "$DEB" "$EXTRACT"
+          find "$EXTRACT" -name "AxsHoldLaunch.dylib" -exec cp {} ./repack/ \;
+          find "$EXTRACT" -name "AxsHoldLaunch.plist" -exec cp {} ./repack/ \;
+          ls -la ./repack
+
+      - name: Upload Repack Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repack-files-${{ matrix.build_variant }}
+          path: ./repack/*
+          if-no-files-found: error
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:

@@ -161,11 +161,19 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
 
 // ---------------------------------------------------------------------------
 // Settings side: inject three rows into ScreenCore's split settings "启动" group.
+//
+// ScreenCorePrefs.bundle is loaded lazily when the user opens the page, so the
+// hook on SCSplitSettingsController cannot be installed in %ctor. Instead,
+// PSListController -loadView (present from the start) triggers the install on
+// the first ScreenCore list view load.
 // ---------------------------------------------------------------------------
 
 static NSString * const AxsHoldLaunchKeyEnabled = @"HoldPressEnabled";
 static NSString * const AxsHoldLaunchKeyThreshold = @"HoldPressThreshold";
 static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
+
+static IMP axs_origSpecifiers = NULL;
+static BOOL axs_settingsInstalled = NO;
 
 // PSSpecifier is resolved at runtime; direct class references would break
 // linking for the SpringBoard slice.
@@ -176,47 +184,7 @@ static PSSpecifier *axs_holdlaunch_specifier(NSString *name, id target, SEL set,
         name, target, set, get, nil, 1, nil);
 }
 
-%group AxsHoldLaunchSettings
-
-// ScreenCore preference bundle controller (loaded only in the Settings process).
-@interface SCSplitSettingsController : PSListController
-- (NSArray *)axs_holdlaunch_injectedSpecifiers;
-- (id)axs_holdlaunch_readValueForSpecifier:(PSSpecifier *)spec;
-- (void)axs_holdlaunch_writeValue:(id)value forSpecifier:(PSSpecifier *)spec;
-@end
-
-%hook SCSplitSettingsController
-
-- (NSArray *)specifiers {
-    NSArray *original = %orig;
-    NSMutableArray *specifiers = [original mutableCopy] ?: [NSMutableArray array];
-    for (PSSpecifier *spec in specifiers) {
-        if ([[spec propertyForKey:@"key"] isEqualToString:AxsHoldLaunchKeyEnabled]) {
-            return original; // already injected
-        }
-    }
-
-    NSUInteger anchor = NSNotFound;
-    for (NSUInteger i = 0; i < specifiers.count; i++) {
-        NSString *key = [(PSSpecifier *)specifiers[i] propertyForKey:@"key"];
-        if ([key isEqualToString:@"splitSideGestureLaunchMode"]
-            || [key isEqualToString:@"splitArcGestureLaunchMode"]) {
-            anchor = i; // keep the last match: the end of the "启动" group
-        }
-    }
-
-    NSArray *added = [self axs_holdlaunch_injectedSpecifiers];
-    if (anchor == NSNotFound) {
-        [specifiers addObjectsFromArray:added];
-    } else {
-        [specifiers insertObjects:added
-                        atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(anchor + 1, added.count)]];
-    }
-    return specifiers;
-}
-
-%new
-- (NSArray *)axs_holdlaunch_injectedSpecifiers {
+static NSArray *axs_holdlaunch_injectedSpecifiers_imp(id self, SEL _cmd) {
     SEL setSel = @selector(axs_holdlaunch_writeValue:forSpecifier:);
     SEL getSel = @selector(axs_holdlaunch_readValueForSpecifier:);
 
@@ -241,8 +209,7 @@ static PSSpecifier *axs_holdlaunch_specifier(NSString *name, id target, SEL set,
     return @[enabled, threshold, reverse];
 }
 
-%new
-- (id)axs_holdlaunch_readValueForSpecifier:(PSSpecifier *)spec {
+static id axs_holdlaunch_readValue_imp(id self, SEL _cmd, PSSpecifier *spec) {
     NSString *key = [spec propertyForKey:@"key"];
     id value = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_valueForKey:key defaultValue:nil];
     if ([key isEqualToString:AxsHoldLaunchKeyEnabled]) return value ?: @NO;
@@ -251,8 +218,7 @@ static PSSpecifier *axs_holdlaunch_specifier(NSString *name, id target, SEL set,
     return value;
 }
 
-%new
-- (void)axs_holdlaunch_writeValue:(id)value forSpecifier:(PSSpecifier *)spec {
+static void axs_holdlaunch_writeValue_imp(id self, SEL _cmd, id value, PSSpecifier *spec) {
     NSString *key = [spec propertyForKey:@"key"];
     if ([key isEqualToString:AxsHoldLaunchKeyThreshold]) {
         double threshold = [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : 1.0;
@@ -271,9 +237,74 @@ static PSSpecifier *axs_holdlaunch_specifier(NSString *name, id target, SEL set,
     }
 }
 
+static NSArray *axs_specifiers_imp(id self, SEL _cmd) {
+    NSArray *original = ((NSArray *(*)(id, SEL))axs_origSpecifiers)(self, _cmd);
+    NSMutableArray *specifiers = [original mutableCopy] ?: [NSMutableArray array];
+    for (PSSpecifier *spec in specifiers) {
+        if ([[spec propertyForKey:@"key"] isEqualToString:AxsHoldLaunchKeyEnabled]) {
+            return original; // already injected
+        }
+    }
+
+    NSUInteger anchor = NSNotFound;
+    for (NSUInteger i = 0; i < specifiers.count; i++) {
+        NSString *key = [(PSSpecifier *)specifiers[i] propertyForKey:@"key"];
+        if ([key isEqualToString:@"splitSideGestureLaunchMode"]
+            || [key isEqualToString:@"splitArcGestureLaunchMode"]) {
+            anchor = i; // keep the last match: the end of the "启动" group
+        }
+    }
+
+    NSArray *added = axs_holdlaunch_injectedSpecifiers_imp(self, _cmd);
+    if (anchor == NSNotFound) {
+        [specifiers addObjectsFromArray:added];
+    } else {
+        [specifiers insertObjects:added
+                        atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(anchor + 1, added.count)]];
+    }
+    NSLog(@"[AxsHoldLaunch] injected %lu specifiers (anchor=%lu of %lu)",
+          (unsigned long)added.count, (unsigned long)anchor, (unsigned long)specifiers.count);
+    return specifiers;
+}
+
+static void axs_holdlaunch_installSettingsHooks(void) {
+    if (axs_settingsInstalled) return;
+    Class cls = objc_getClass("SCSplitSettingsController");
+    if (!cls) return;
+    SEL sel = @selector(specifiers);
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method) return;
+
+    const char *types = method_getTypeEncoding(method);
+    IMP original = method_getImplementation(method);
+    if (class_addMethod(cls, sel, (IMP)axs_specifiers_imp, types)) {
+        // The subclass inherited -specifiers; adding it locally keeps every
+        // other list controller untouched.
+        axs_origSpecifiers = original;
+    } else {
+        MSHookMessageEx(cls, sel, (IMP)axs_specifiers_imp, &axs_origSpecifiers);
+    }
+    class_addMethod(cls, @selector(axs_holdlaunch_injectedSpecifiers), (IMP)axs_holdlaunch_injectedSpecifiers_imp, "@@:");
+    class_addMethod(cls, @selector(axs_holdlaunch_readValueForSpecifier:), (IMP)axs_holdlaunch_readValue_imp, "@@:@");
+    class_addMethod(cls, @selector(axs_holdlaunch_writeValue:forSpecifier:), (IMP)axs_holdlaunch_writeValue_imp, "v@:@");
+    axs_settingsInstalled = YES;
+    NSLog(@"[AxsHoldLaunch] settings hooks installed");
+}
+
+%group AxsHoldLaunchSettingsTrigger
+
+%hook PSListController
+
+- (void)loadView {
+    // ScreenCorePrefs.bundle is already loaded by the time a ScreenCore list
+    // controller loads its view.
+    axs_holdlaunch_installSettingsHooks();
+    %orig;
+}
+
 %end
 
-%end // AxsHoldLaunchSettings
+%end // AxsHoldLaunchSettingsTrigger
 
 // ---------------------------------------------------------------------------
 
@@ -284,8 +315,8 @@ static PSSpecifier *axs_holdlaunch_specifier(NSString *name, id target, SEL set,
 
         if (objc_getClass("SpringBoard") != nil) {
             axs_holdlaunch_installSpringBoardHooks();
-        } else if (objc_getClass("SCSplitSettingsController") != nil) {
-            %init(AxsHoldLaunchSettings);
+        } else if (objc_getClass("PSListController") != nil) {
+            %init(AxsHoldLaunchSettingsTrigger);
         }
     }
 }
