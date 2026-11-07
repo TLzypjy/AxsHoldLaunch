@@ -20,6 +20,38 @@ static NSTimeInterval axs_holdlaunch_now(void) {
     return [[NSDate date] timeIntervalSince1970];
 }
 
+// NSLog goes into the unified log which is hard to read on-device; mirror
+// every line into a plain file the user can open with Filza.
+static void axs_holdlaunch_log(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+static void axs_holdlaunch_log(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    NSLog(@"[AxsHoldLaunch] %@", message);
+
+    NSString *path = @"/var/mobile/Library/Caches/AxsHoldLaunch.log";
+    @try {
+        NSFileManager *manager = [NSFileManager defaultManager];
+        NSDictionary *attributes = [manager attributesOfItemAtPath:path error:nil];
+        if ([attributes fileSize] > 512 * 1024) {
+            [manager removeItemAtPath:path error:nil];
+        }
+        NSString *line = [NSString stringWithFormat:@"%.3f %@\n",
+                          [[NSDate date] timeIntervalSince1970], message];
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (handle == nil) {
+            [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        } else {
+            [handle seekToEndOfFile];
+            [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [handle closeFile];
+        }
+    } @catch (NSException *exception) {
+        // logging must never take the host process down
+    }
+}
+
 // Main-thread gesture state; the hooks all run on the main thread.
 static NSTimeInterval axs_arrivalTime = 0;        // when the current icon became selected
 static NSString *axs_arrivalBundle = nil;         // bundle id selected at axs_arrivalTime
@@ -61,18 +93,21 @@ static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
 }
 
 static void axs_holdlaunch_handleSelected(id self, SEL _cmd, id bundle, id sourceFrame) {
-    if ([[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isEnabled]) {
-        NSTimeInterval dwell = -1.0;
-        if ([bundle isKindOfClass:[NSString class]]
-            && [bundle isEqualToString:axs_arrivalBundle]
-            && axs_arrivalTime > 0) {
-            dwell = axs_holdlaunch_now() - axs_arrivalTime;
-        }
+    BOOL enabled = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isEnabled];
+    NSTimeInterval dwell = -1.0;
+    if ([bundle isKindOfClass:[NSString class]]
+        && [bundle isEqualToString:axs_arrivalBundle]
+        && axs_arrivalTime > 0) {
+        dwell = axs_holdlaunch_now() - axs_arrivalTime;
+    }
+    axs_holdlaunch_log(@"selected bundle=%@ enabled=%d arrival=%.2f dwell=%.2f",
+                       bundle, enabled, axs_arrivalTime, dwell);
+    if (enabled) {
         if (dwell >= 0.0 && dwell <= 30.0) {
             axs_pendingDwell = dwell;
             axs_pendingBundle = bundle;
             axs_pendingArmTime = axs_holdlaunch_now();
-            NSLog(@"[AxsHoldLaunch] armed dwell=%.2f bundle=%@", dwell, bundle);
+            axs_holdlaunch_log(@"armed dwell=%.2f bundle=%@", dwell, bundle);
         }
     }
     ((void(*)(id, SEL, id, id))axs_origHandleSelected)(self, _cmd, bundle, sourceFrame);
@@ -92,8 +127,8 @@ static id axs_holdlaunch_openTarget(id self, SEL _cmd, id targetIdentifier, id t
             double threshold = [config axs_holdlaunch_threshold];
             BOOL reverse = [config axs_holdlaunch_reverse];
             fullscreen = reverse ? (axs_pendingDwell < threshold) : (axs_pendingDwell >= threshold);
-            NSLog(@"[AxsHoldLaunch] override dwell=%.2f threshold=%.2f reverse=%d -> fullscreen=%d",
-                  axs_pendingDwell, threshold, reverse, fullscreen);
+            axs_holdlaunch_log(@"override dwell=%.2f threshold=%.2f reverse=%d -> fullscreen=%d",
+                               axs_pendingDwell, threshold, reverse, fullscreen);
         }
     }
     axs_pendingDwell = -1.0;
@@ -154,9 +189,9 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger openCount = axs_holdlaunch_hookSelector(selOpenTarget, (IMP)axs_holdlaunch_openTarget, &axs_origOpenTarget);
     NSUInteger finishCount = axs_holdlaunch_hookSelector(selFinish, (IMP)axs_holdlaunch_finishTracking, &axs_origFinishTracking);
 
-    NSLog(@"[AxsHoldLaunch] springboard hooks: update=%lu setBundle=%lu handle=%lu openTarget=%lu finish=%lu",
-          (unsigned long)updateCount, (unsigned long)setBundleCount,
-          (unsigned long)handleCount, (unsigned long)openCount, (unsigned long)finishCount);
+    axs_holdlaunch_log(@"springboard hooks: update=%lu setBundle=%lu handle=%lu openTarget=%lu finish=%lu",
+                       (unsigned long)updateCount, (unsigned long)setBundleCount,
+                       (unsigned long)handleCount, (unsigned long)openCount, (unsigned long)finishCount);
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +323,7 @@ static void axs_holdlaunch_installSettingsHooks(void) {
     class_addMethod(cls, @selector(axs_holdlaunch_readValueForSpecifier:), (IMP)axs_holdlaunch_readValue_imp, "@@:@");
     class_addMethod(cls, @selector(axs_holdlaunch_writeValue:forSpecifier:), (IMP)axs_holdlaunch_writeValue_imp, "v@:@");
     axs_settingsInstalled = YES;
-    NSLog(@"[AxsHoldLaunch] settings hooks installed");
+    axs_holdlaunch_log(@"settings hooks installed");
 }
 
 %group AxsHoldLaunchSettingsTrigger
@@ -298,6 +333,8 @@ static void axs_holdlaunch_installSettingsHooks(void) {
 - (void)loadView {
     // ScreenCorePrefs.bundle is already loaded by the time a ScreenCore list
     // controller loads its view.
+    axs_holdlaunch_log(@"PSListController loadView: %@",
+                       NSStringFromClass([self class]));
     axs_holdlaunch_installSettingsHooks();
     %orig;
 }
@@ -314,9 +351,13 @@ static void axs_holdlaunch_installSettingsHooks(void) {
         [AxsHoldLaunchConfig axs_holdlaunch_shared];
 
         if (objc_getClass("SpringBoard") != nil) {
+            axs_holdlaunch_log(@"loaded in SpringBoard");
             axs_holdlaunch_installSpringBoardHooks();
         } else if (objc_getClass("PSListController") != nil) {
+            axs_holdlaunch_log(@"loaded in Settings");
             %init(AxsHoldLaunchSettingsTrigger);
+        } else {
+            axs_holdlaunch_log(@"loaded in unknown process");
         }
     }
 }
