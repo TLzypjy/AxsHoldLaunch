@@ -56,16 +56,13 @@ static void axs_holdlaunch_log(NSString *format, ...) {
 static NSTimeInterval axs_arrivalTime = 0;        // when the current icon became selected
 static NSString *axs_arrivalBundle = nil;         // bundle id selected at axs_arrivalTime
 static NSString *axs_lastSeenBundle = nil;
-static NSTimeInterval axs_lastTrackingActivity = 0;
 static NSTimeInterval axs_pendingArmTime = 0;     // 0 = nothing pending
 static NSTimeInterval axs_pendingDwell = -1;
 static NSString *axs_pendingBundle = nil;
 
-static IMP axs_origUpdateSelection = NULL;
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origHandleSelected = NULL;
 static IMP axs_origOpenTarget = NULL;
-static IMP axs_origFinishTracking = NULL;
 
 static void axs_holdlaunch_recordArrival(NSString *bundle) {
     if (![bundle isKindOfClass:[NSString class]] || bundle.length == 0) return;
@@ -73,19 +70,6 @@ static void axs_holdlaunch_recordArrival(NSString *bundle) {
     axs_lastSeenBundle = bundle;
     axs_arrivalBundle = bundle;
     axs_arrivalTime = axs_holdlaunch_now();
-}
-
-static void axs_holdlaunch_updateSelectionAtPoint(id self, SEL _cmd, CGPoint point) {
-    ((void(*)(id, SEL, CGPoint))axs_origUpdateSelection)(self, _cmd, point);
-    axs_lastTrackingActivity = axs_holdlaunch_now();
-    if ([self respondsToSelector:@selector(selectedBundleIdentifier)]) {
-        id bundle = ((id(*)(id, SEL))objc_msgSend)(self, @selector(selectedBundleIdentifier));
-        NSTimeInterval before = axs_arrivalTime;
-        axs_holdlaunch_recordArrival(bundle);
-        if (axs_arrivalTime != before && [bundle isKindOfClass:[NSString class]]) {
-            axs_holdlaunch_log(@"arrival(update) bundle=%@ point=(%.0f,%.0f)", bundle, point.x, point.y);
-        }
-    }
 }
 
 static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
@@ -100,7 +84,9 @@ static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     }
 }
 
-static void axs_holdlaunch_handleSelected(id self, SEL _cmd, id bundle, id sourceFrame) {
+static void axs_holdlaunch_handleSelected(id self, SEL _cmd, id bundle, CGRect sourceFrame) {
+    // sourceFrame is a CGRect HFA (passed in vector registers on arm64);
+    // declaring it id shifted every later register and corrupted the call.
     BOOL enabled = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isEnabled];
     NSTimeInterval dwell = -1.0;
     if ([bundle isKindOfClass:[NSString class]]
@@ -118,14 +104,14 @@ static void axs_holdlaunch_handleSelected(id self, SEL _cmd, id bundle, id sourc
             axs_holdlaunch_log(@"armed dwell=%.2f bundle=%@", dwell, bundle);
         }
     }
-    ((void(*)(id, SEL, id, id))axs_origHandleSelected)(self, _cmd, bundle, sourceFrame);
+    ((void(*)(id, SEL, id, CGRect))axs_origHandleSelected)(self, _cmd, bundle, sourceFrame);
 }
 
 static id axs_holdlaunch_openTarget(id self, SEL _cmd, id targetIdentifier, id transitionContext,
-                                    unsigned long sourceRect, unsigned long gestureProfile, BOOL launchFullscreen) {
-    // gestureProfile and presentationSourceRect are passed through bit-exact
-    // as integers: declaring them as id made ARC retain primitive values
-    // (EXC_BAD_ACCESS at objc_retain on the first selection).
+                                    CGRect presentationSourceRect, unsigned long gestureProfile, BOOL launchFullscreen) {
+    // presentationSourceRect is a CGRect HFA (vector registers) and
+    // gestureProfile a primitive integer; wrong declarations misaligned the
+    // whole register window and crashed inside ScreenCore.
     BOOL fullscreen = launchFullscreen;
     if (axs_pendingDwell >= 0.0 && axs_holdlaunch_now() - axs_pendingArmTime <= 3.0) {
         BOOL matches = YES;
@@ -144,15 +130,8 @@ static id axs_holdlaunch_openTarget(id self, SEL _cmd, id targetIdentifier, id t
     }
     axs_pendingDwell = -1.0;
     axs_pendingArmTime = 0;
-    return ((id(*)(id, SEL, id, id, unsigned long, unsigned long, BOOL))axs_origOpenTarget)(
-        self, _cmd, targetIdentifier, transitionContext, sourceRect, gestureProfile, fullscreen);
-}
-
-static void axs_holdlaunch_finishTracking(id self, SEL _cmd) {
-    ((void(*)(id, SEL))axs_origFinishTracking)(self, _cmd);
-    axs_lastSeenBundle = nil;
-    axs_arrivalBundle = nil;
-    axs_arrivalTime = 0;
+    return ((id(*)(id, SEL, id, id, CGRect, unsigned long, BOOL))axs_origOpenTarget)(
+        self, _cmd, targetIdentifier, transitionContext, presentationSourceRect, gestureProfile, fullscreen);
 }
 
 static BOOL axs_springboardHooksInstalled = NO;
@@ -195,21 +174,21 @@ static NSUInteger axs_holdlaunch_hookSelector(SEL selector, IMP replacement, IMP
 static void axs_holdlaunch_installSpringBoardHooks(void) {
     if (axs_springboardHooksInstalled) return;
     axs_springboardHooksInstalled = YES;
-    SEL selUpdate = NSSelectorFromString(AxsHoldLaunchSelUpdateSelection);
     SEL selSetBundle = NSSelectorFromString(AxsHoldLaunchSelSetSelectedBundle);
     SEL selHandle = NSSelectorFromString(AxsHoldLaunchSelHandleSelected);
     SEL selOpenTarget = NSSelectorFromString(AxsHoldLaunchSelOpenTarget);
-    SEL selFinish = NSSelectorFromString(AxsHoldLaunchSelFinishTracking);
 
-    NSUInteger updateCount = axs_holdlaunch_hookSelector(selUpdate, (IMP)axs_holdlaunch_updateSelectionAtPoint, &axs_origUpdateSelection);
     NSUInteger setBundleCount = axs_holdlaunch_hookSelector(selSetBundle, (IMP)axs_holdlaunch_setSelectedBundle, &axs_origSetSelectedBundle);
     NSUInteger handleCount = axs_holdlaunch_hookSelector(selHandle, (IMP)axs_holdlaunch_handleSelected, &axs_origHandleSelected);
     NSUInteger openCount = axs_holdlaunch_hookSelector(selOpenTarget, (IMP)axs_holdlaunch_openTarget, &axs_origOpenTarget);
-    NSUInteger finishCount = axs_holdlaunch_hookSelector(selFinish, (IMP)axs_holdlaunch_finishTracking, &axs_origFinishTracking);
 
-    axs_holdlaunch_log(@"springboard hooks: update=%lu setBundle=%lu handle=%lu openTarget=%lu finish=%lu",
-                       (unsigned long)updateCount, (unsigned long)setBundleCount,
-                       (unsigned long)handleCount, (unsigned long)openCount, (unsigned long)finishCount);
+    // sc_updateSelectionAtPoint: and sc_finishTracking are deliberately NOT
+    // hooked: their argument layout is unconfirmed, they contributed no
+    // arrival data, and finishTracking wiped the arrival right before the
+    // selection handler read it.
+    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu handle=%lu openTarget=%lu",
+                       (unsigned long)setBundleCount,
+                       (unsigned long)handleCount, (unsigned long)openCount);
 }
 
 // ---------------------------------------------------------------------------
