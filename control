@@ -1,0 +1,9 @@
+Package: com.axs.holdlaunch
+Name: ARC 长按全屏启动
+Version: 5.2.0
+Architecture: iphoneos-arm
+Description: 为 ScreenCore 的 ARC 菜单增加长按松手触发：在菜单图标上停留达到设定时长即全屏打开应用，不满时长按分屏打开；支持反转动作。设置位于 ScreenCore 分屏设置-启动。
+Maintainer: Axs
+Author: Axs
+Section: Axs-Tweaks
+Depends: mobilesubstrate
