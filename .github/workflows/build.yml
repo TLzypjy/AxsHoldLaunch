@@ -93,10 +93,12 @@ jobs:
             dpkg-deb -x "$deb" "$DEB_DIR"
             DYLIB=$(find "$DEB_DIR" -name "AxsHoldLaunch.dylib" | head -n 1)
             test -n "$DYLIB"
-            strings -a "$DYLIB" | grep -E "sc_handleSelectedBundleIdentifier|sc_openTargetIdentifier|HoldPressEnabled|axs.holdlaunch|jbroot" | sort -u
-            test -f "$DEB_DIR/Library/MobileSubstrate/DynamicLibraries/AxsHoldLaunch.plist"
-            grep -q "com.apple.springboard" "$DEB_DIR/Library/MobileSubstrate/DynamicLibraries/AxsHoldLaunch.plist"
-            grep -q "com.apple.Preferences" "$DEB_DIR/Library/MobileSubstrate/DynamicLibraries/AxsHoldLaunch.plist"
+            strings -a "$DYLIB" | grep -E "sc_handleSelectedBundleIdentifier|sc_openTargetIdentifier|HoldPressEnabled|axs.holdlaunch" | sort -u
+            PLIST="$DEB_DIR/Library/MobileSubstrate/DynamicLibraries/AxsHoldLaunch.plist"
+            test -f "$PLIST"
+            plutil -convert xml1 -o - "$PLIST" > "$DEB_DIR/filter.xml"
+            grep -q "com.apple.springboard" "$DEB_DIR/filter.xml"
+            grep -q "com.apple.Preferences" "$DEB_DIR/filter.xml"
             rm -rf "$DEB_DIR"
             echo "verify ok"
           done
