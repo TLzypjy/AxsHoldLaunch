@@ -2,6 +2,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "AxsHoldLaunchConfig.h"
+#import "AxsHoldLaunchPreferences.h"
 #import "AxsHoldLaunchPrivate.h"
 
 // ---------------------------------------------------------------------------
@@ -167,6 +168,10 @@ static NSString * const AxsHoldLaunchKeyThreshold = @"HoldPressThreshold";
 static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
 
 %group AxsHoldLaunchSettings
+
+// ScreenCore preference bundle controller (loaded only in the Settings process).
+@interface SCSplitSettingsController : PSListController
+@end
 
 %hook SCSplitSettingsController
 
