@@ -112,6 +112,62 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
     return axs_holdlaunch_gestureMode_imp(self, _cmd, axs_origArcGestureMode);
 }
 
+// ---------------------------------------------------------------------------
+// Jump/callback auto-close: when ScreenCore routes an open request to app B
+// (payment page, converter, ...) and shortly afterwards routes back to a
+// DIFFERENT app A (payment completion callback, conversion finished), close
+// the floating session of B. Uses only signature-safe hooks.
+// ---------------------------------------------------------------------------
+
+static IMP axs_origRoute = NULL;
+static IMP axs_origSessionFor = NULL;
+static IMP axs_origCloseSession = NULL;
+static __weak id axs_sessionManager = nil;
+static NSTimeInterval axs_lastJumpTime = 0;
+static NSString *axs_lastJumpBundle = nil;
+static BOOL axs_sessionManagerLogged = NO;
+
+static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) {
+    if (axs_sessionManager == nil) {
+        axs_sessionManager = self;
+        if (!axs_sessionManagerLogged) {
+            axs_sessionManagerLogged = YES;
+            axs_holdlaunch_log(@"session manager captured: %@", NSStringFromClass([self class]));
+        }
+    }
+    return ((id(*)(id, SEL, id))axs_origSessionFor)(self, _cmd, bundleIdentifier);
+}
+
+static void axs_holdlaunch_closeSessionForBundle(NSString *bundleIdentifier, NSString *reason) {
+    id manager = axs_sessionManager;
+    if (manager == nil || bundleIdentifier.length == 0) return;
+    id session = ((id(*)(id, SEL, id))objc_msgSend)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
+    if (session == nil) return;
+    ((void(*)(id, SEL, id, BOOL))objc_msgSend)(manager, @selector(sc_closeSession:animated:), session, YES);
+    axs_holdlaunch_log(@"auto-closed jumped window bundle=%@ reason=%@", bundleIdentifier, reason);
+}
+
+static id axs_holdlaunch_route_imp(id self, SEL _cmd, id bundleIdentifier,
+                                   unsigned long options, unsigned long origin, BOOL forward) {
+    // Only bundleIdentifier is read as an object; the other arguments are
+    // passed through bit-exact as integers.
+    axs_holdlaunch_log(@"route bundle=%@", bundleIdentifier);
+    BOOL isString = [bundleIdentifier isKindOfClass:[NSString class]];
+    if (isString
+        && [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isAutoCloseEnabled]
+        && axs_lastJumpBundle != nil
+        && ![bundleIdentifier isEqualToString:axs_lastJumpBundle]
+        && axs_holdlaunch_now() - axs_lastJumpTime <= 120.0) {
+        axs_holdlaunch_closeSessionForBundle(axs_lastJumpBundle, @"callback-return");
+    }
+    if (isString) {
+        axs_lastJumpBundle = bundleIdentifier;
+        axs_lastJumpTime = axs_holdlaunch_now();
+    }
+    return ((id(*)(id, SEL, id, unsigned long, unsigned long, BOOL))axs_origRoute)(
+        self, _cmd, bundleIdentifier, options, origin, forward);
+}
+
 static BOOL axs_springboardHooksInstalled = NO;
 
 static NSArray<Class> *axs_holdlaunch_classesDeclaring(SEL selector) {
@@ -160,11 +216,18 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger modeCount = axs_holdlaunch_hookSelector(selMode, (IMP)axs_holdlaunch_gestureMode_imp_a, &axs_origGestureMode);
     NSUInteger arcModeCount = axs_holdlaunch_hookSelector(selArcMode, (IMP)axs_holdlaunch_gestureMode_imp_b, &axs_origArcGestureMode);
 
+    // Jump/callback auto-close hooks (all signature-safe).
+    SEL selRoute = @selector(sc_routeApplicationRequestForBundleIdentifier:options:origin:forward:);
+    NSUInteger routeCount = axs_holdlaunch_hookSelector(selRoute, (IMP)axs_holdlaunch_route_imp, &axs_origRoute);
+    SEL selSessionFor = @selector(sc_sessionForBundleIdentifier:);
+    NSUInteger sessionForCount = axs_holdlaunch_hookSelector(selSessionFor, (IMP)axs_holdlaunch_sessionFor_imp, &axs_origSessionFor);
+
     // Only signature-safe hooks remain: the setter receives strings and the
     // mode getters take/return plain longs (Tq in the ObjC metadata).
-    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu",
+    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu route=%lu sessionFor=%lu",
                        (unsigned long)setBundleCount,
-                       (unsigned long)modeCount, (unsigned long)arcModeCount);
+                       (unsigned long)modeCount, (unsigned long)arcModeCount,
+                       (unsigned long)routeCount, (unsigned long)sessionForCount);
 }
 
 // ---------------------------------------------------------------------------

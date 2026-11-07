@@ -66,6 +66,11 @@ static void axs_holdlaunch_preferencesDidChange(CFNotificationCenterRef center, 
     return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
 }
 
+- (BOOL)axs_holdlaunch_isAutoCloseEnabled {
+    id value = [self axs_holdlaunch_valueForKey:@"AutoCloseJumpWindow" defaultValue:@YES];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : YES;
+}
+
 - (void)dealloc {
     CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                             (__bridge const void *)self);
