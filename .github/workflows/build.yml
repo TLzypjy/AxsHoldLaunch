@@ -112,8 +112,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ./repack
-          DEB=$(ls ./packages/*arm64e*.deb 2>/dev/null | head -n 1)
-          if [ -z "$DEB" ]; then DEB=$(ls ./packages/*.deb | head -n 1); fi
+          DEB=$(find ./packages -name "*arm64e*.deb" | head -n 1)
+          if [ -z "$DEB" ]; then DEB=$(find ./packages -name "*.deb" | head -n 1); fi
           EXTRACT="$(mktemp -d)"
           dpkg-deb -x "$DEB" "$EXTRACT"
           find "$EXTRACT" -name "AxsHoldLaunch.dylib" -exec cp {} ./repack/ \;

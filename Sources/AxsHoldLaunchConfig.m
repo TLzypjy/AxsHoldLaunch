@@ -56,7 +56,7 @@ static void axs_holdlaunch_preferencesDidChange(CFNotificationCenterRef center, 
 - (double)axs_holdlaunch_threshold {
     id value = [self axs_holdlaunch_valueForKey:@"HoldPressThreshold" defaultValue:@1.0];
     double threshold = [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : 1.0;
-    if (!(threshold > 0.05)) threshold = 0.05;
+    if (!(threshold >= 0.2)) threshold = 0.2;
     if (threshold > 5.0) threshold = 5.0;
     return threshold;
 }

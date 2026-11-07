@@ -144,16 +144,20 @@ static void axs_holdlaunch_finishTracking(id self, SEL _cmd) {
     axs_arrivalTime = 0;
 }
 
+static BOOL axs_springboardHooksInstalled = NO;
+
 static NSArray<Class> *axs_holdlaunch_classesDeclaring(SEL selector) {
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     if (!classes) return @[];
     NSMutableArray<Class> *result = [NSMutableArray array];
+    unsigned int scClasses = 0;
     for (unsigned int i = 0; i < count; i++) {
         Class cls = classes[i];
         // ScreenCore classes all start with SC / SCWS; limit the scan to them.
         const char *name = class_getName(cls);
         if (strncmp(name, "SC", 2) != 0) continue;
+        scClasses++;
         unsigned int methodCount = 0;
         Method *methods = class_copyMethodList(cls, &methodCount);
         BOOL declared = NO;
@@ -164,6 +168,7 @@ static NSArray<Class> *axs_holdlaunch_classesDeclaring(SEL selector) {
         if (declared) [result addObject:cls];
     }
     free(classes);
+    axs_holdlaunch_log(@"scan '%s': %u SC classes of %u total", sel_getName(selector), scClasses, count);
     return result;
 }
 
@@ -177,6 +182,8 @@ static NSUInteger axs_holdlaunch_hookSelector(SEL selector, IMP replacement, IMP
 }
 
 static void axs_holdlaunch_installSpringBoardHooks(void) {
+    if (axs_springboardHooksInstalled) return;
+    axs_springboardHooksInstalled = YES;
     SEL selUpdate = NSSelectorFromString(AxsHoldLaunchSelUpdateSelection);
     SEL selSetBundle = NSSelectorFromString(AxsHoldLaunchSelSetSelectedBundle);
     SEL selHandle = NSSelectorFromString(AxsHoldLaunchSelHandleSelected);
@@ -345,6 +352,25 @@ static void axs_holdlaunch_installSettingsHooks(void) {
 
 // ---------------------------------------------------------------------------
 
+%group AxsHoldLaunchSpringBoardTrigger
+
+%hook SpringBoard
+
+// ScreenCore's dylib may load AFTER this tweak (dlopen order is not
+// guaranteed), so its classes are only guaranteed to exist once the
+// system has finished launching -- install the real hooks there.
+- (void)applicationDidFinishLaunching:(id)application {
+    axs_holdlaunch_log(@"springboard didFinishLaunching");
+    axs_holdlaunch_installSpringBoardHooks();
+    %orig;
+}
+
+%end
+
+%end // AxsHoldLaunchSpringBoardTrigger
+
+// ---------------------------------------------------------------------------
+
 %ctor {
     @autoreleasepool {
         // Readers load a snapshot; they never write default preferences.
@@ -352,7 +378,7 @@ static void axs_holdlaunch_installSettingsHooks(void) {
 
         if (objc_getClass("SpringBoard") != nil) {
             axs_holdlaunch_log(@"loaded in SpringBoard");
-            axs_holdlaunch_installSpringBoardHooks();
+            %init(AxsHoldLaunchSpringBoardTrigger);
         } else if (objc_getClass("PSListController") != nil) {
             axs_holdlaunch_log(@"loaded in Settings");
             %init(AxsHoldLaunchSettingsTrigger);
