@@ -56,13 +56,10 @@ static void axs_holdlaunch_log(NSString *format, ...) {
 static NSTimeInterval axs_arrivalTime = 0;        // when the current icon became selected
 static NSString *axs_arrivalBundle = nil;         // bundle id selected at axs_arrivalTime
 static NSString *axs_lastSeenBundle = nil;
-static NSTimeInterval axs_pendingArmTime = 0;     // 0 = nothing pending
-static NSTimeInterval axs_pendingDwell = -1;
-static NSString *axs_pendingBundle = nil;
 
 static IMP axs_origSetSelectedBundle = NULL;
-static IMP axs_origHandleSelected = NULL;
-static IMP axs_origOpenTarget = NULL;
+static IMP axs_origGestureMode = NULL;
+static IMP axs_origArcGestureMode = NULL;
 
 static void axs_holdlaunch_recordArrival(NSString *bundle) {
     if (![bundle isKindOfClass:[NSString class]] || bundle.length == 0) return;
@@ -74,9 +71,6 @@ static void axs_holdlaunch_recordArrival(NSString *bundle) {
 
 static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     ((void(*)(id, SEL, id))axs_origSetSelectedBundle)(self, _cmd, bundle);
-    // No tracking gate: ScreenCore may not route every menu interaction
-    // through sc_updateSelectionAtPoint:, and a stale arrival is only used
-    // when the SAME bundle is selected within the freshness window.
     axs_holdlaunch_recordArrival(bundle);
     if ([bundle isKindOfClass:[NSString class]] && axs_arrivalTime > 0
         && [bundle isEqualToString:axs_arrivalBundle]) {
@@ -84,54 +78,38 @@ static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     }
 }
 
-static void axs_holdlaunch_handleSelected(id self, SEL _cmd, id bundle, CGRect sourceFrame) {
-    // sourceFrame is a CGRect HFA (passed in vector registers on arm64);
-    // declaring it id shifted every later register and corrupted the call.
-    BOOL enabled = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isEnabled];
-    NSTimeInterval dwell = -1.0;
-    if ([bundle isKindOfClass:[NSString class]]
-        && [bundle isEqualToString:axs_arrivalBundle]
-        && axs_arrivalTime > 0) {
-        dwell = axs_holdlaunch_now() - axs_arrivalTime;
-    }
-    axs_holdlaunch_log(@"selected bundle=%@ enabled=%d arrival=%.2f dwell=%.2f",
-                       bundle, enabled, axs_arrivalTime, dwell);
-    if (enabled) {
-        if (dwell >= 0.0 && dwell <= 30.0) {
-            axs_pendingDwell = dwell;
-            axs_pendingBundle = bundle;
-            axs_pendingArmTime = axs_holdlaunch_now();
-            axs_holdlaunch_log(@"armed dwell=%.2f bundle=%@", dwell, bundle);
-        }
-    }
-    ((void(*)(id, SEL, id, CGRect))axs_origHandleSelected)(self, _cmd, bundle, sourceFrame);
-}
-
-static id axs_holdlaunch_openTarget(id self, SEL _cmd, id targetIdentifier, id transitionContext,
-                                    CGRect presentationSourceRect, unsigned long gestureProfile, BOOL launchFullscreen) {
-    // presentationSourceRect is a CGRect HFA (vector registers) and
-    // gestureProfile a primitive integer; wrong declarations misaligned the
-    // whole register window and crashed inside ScreenCore.
-    BOOL fullscreen = launchFullscreen;
-    if (axs_pendingDwell >= 0.0 && axs_holdlaunch_now() - axs_pendingArmTime <= 3.0) {
-        BOOL matches = YES;
-        if ([targetIdentifier isKindOfClass:[NSString class]] && axs_pendingBundle.length > 0
-            && ![targetIdentifier isEqualToString:axs_pendingBundle]) {
-            matches = NO;
-        }
-        if (matches) {
+// The open-mode decision reads splitGestureLaunchMode / splitArcGestureLaunch
+// Mode (long: 0 = split, 1 = fullscreen, per the specifier's validValues).
+// Overriding the getter avoids every unknown-type argument of the deep open
+// funnel, which crashed inside objc_retain twice.
+static long axs_holdlaunch_gestureMode_imp(id self, SEL _cmd, IMP original) {
+    long mode = ((long(*)(id, SEL))original)(self, _cmd);
+    if (axs_arrivalTime > 0) {
+        NSTimeInterval dwell = axs_holdlaunch_now() - axs_arrivalTime;
+        if (dwell >= 0.0 && dwell <= 5.0
+            && [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isEnabled]) {
             AxsHoldLaunchConfig *config = [AxsHoldLaunchConfig axs_holdlaunch_shared];
             double threshold = [config axs_holdlaunch_threshold];
             BOOL reverse = [config axs_holdlaunch_reverse];
-            fullscreen = reverse ? (axs_pendingDwell < threshold) : (axs_pendingDwell >= threshold);
-            axs_holdlaunch_log(@"override dwell=%.2f threshold=%.2f reverse=%d -> fullscreen=%d",
-                               axs_pendingDwell, threshold, reverse, fullscreen);
+            BOOL wantFullscreen = reverse ? (dwell < threshold) : (dwell >= threshold);
+            long forced = wantFullscreen ? 1 : 0;
+            axs_holdlaunch_log(@"mode override bundle=%@ dwell=%.2f threshold=%.2f reverse=%d orig=%ld forced=%ld",
+                               axs_arrivalBundle, dwell, threshold, reverse, mode, forced);
+            axs_arrivalTime = 0;
+            axs_arrivalBundle = nil;
+            axs_lastSeenBundle = nil;
+            return forced;
         }
     }
-    axs_pendingDwell = -1.0;
-    axs_pendingArmTime = 0;
-    return ((id(*)(id, SEL, id, id, CGRect, unsigned long, BOOL))axs_origOpenTarget)(
-        self, _cmd, targetIdentifier, transitionContext, presentationSourceRect, gestureProfile, fullscreen);
+    return mode;
+}
+
+static long axs_holdlaunch_gestureMode_imp_a(id self, SEL _cmd) {
+    return axs_holdlaunch_gestureMode_imp(self, _cmd, axs_origGestureMode);
+}
+
+static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
+    return axs_holdlaunch_gestureMode_imp(self, _cmd, axs_origArcGestureMode);
 }
 
 static BOOL axs_springboardHooksInstalled = NO;
@@ -175,20 +153,18 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     if (axs_springboardHooksInstalled) return;
     axs_springboardHooksInstalled = YES;
     SEL selSetBundle = NSSelectorFromString(AxsHoldLaunchSelSetSelectedBundle);
-    SEL selHandle = NSSelectorFromString(AxsHoldLaunchSelHandleSelected);
-    SEL selOpenTarget = NSSelectorFromString(AxsHoldLaunchSelOpenTarget);
+    SEL selMode = @selector(splitGestureLaunchMode);
+    SEL selArcMode = @selector(splitArcGestureLaunchMode);
 
     NSUInteger setBundleCount = axs_holdlaunch_hookSelector(selSetBundle, (IMP)axs_holdlaunch_setSelectedBundle, &axs_origSetSelectedBundle);
-    NSUInteger handleCount = axs_holdlaunch_hookSelector(selHandle, (IMP)axs_holdlaunch_handleSelected, &axs_origHandleSelected);
-    NSUInteger openCount = axs_holdlaunch_hookSelector(selOpenTarget, (IMP)axs_holdlaunch_openTarget, &axs_origOpenTarget);
+    NSUInteger modeCount = axs_holdlaunch_hookSelector(selMode, (IMP)axs_holdlaunch_gestureMode_imp_a, &axs_origGestureMode);
+    NSUInteger arcModeCount = axs_holdlaunch_hookSelector(selArcMode, (IMP)axs_holdlaunch_gestureMode_imp_b, &axs_origArcGestureMode);
 
-    // sc_updateSelectionAtPoint: and sc_finishTracking are deliberately NOT
-    // hooked: their argument layout is unconfirmed, they contributed no
-    // arrival data, and finishTracking wiped the arrival right before the
-    // selection handler read it.
-    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu handle=%lu openTarget=%lu",
+    // Only signature-safe hooks remain: the setter receives strings and the
+    // mode getters take/return plain longs (Tq in the ObjC metadata).
+    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu",
                        (unsigned long)setBundleCount,
-                       (unsigned long)handleCount, (unsigned long)openCount);
+                       (unsigned long)modeCount, (unsigned long)arcModeCount);
 }
 
 // ---------------------------------------------------------------------------
