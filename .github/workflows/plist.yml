@@ -1,0 +1,43 @@
+name: Plist Tools
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  convert:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Original plist to XML
+        if: hashFiles('plist/SplitSettings.original.plist') != ''
+        run: |
+          plutil -convert xml1 -o SplitSettings.original.xml plist/SplitSettings.original.plist
+          echo "converted original -> xml"
+
+      - name: Upload XML
+        if: hashFiles('plist/SplitSettings.original.plist') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: splitsettings-xml
+          path: SplitSettings.original.xml
+          if-no-files-found: ignore
+
+      - name: Edited XML to binary plist
+        if: hashFiles('plist/SplitSettings.edited.xml') != ''
+        run: |
+          plutil -convert binary1 -o SplitSettings.edited.plist plist/SplitSettings.edited.xml
+          plutil -lint SplitSettings.edited.plist
+          echo "converted xml -> binary1"
+
+      - name: Upload binary
+        if: hashFiles('plist/SplitSettings.edited.xml') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: splitsettings-binary
+          path: SplitSettings.edited.plist
+          if-no-files-found: ignore
