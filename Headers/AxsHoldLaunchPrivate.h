@@ -23,11 +23,10 @@ void MSHookMessageEx(Class _class, SEL message, IMP hook, IMP *old);
 #define AxsHoldLaunchSelOpenTarget          @"sc_openTargetIdentifier:transitionContext:presentationSourceRect:gestureProfile:launchFullscreen:"
 #define AxsHoldLaunchSelFinishTracking      @"sc_finishTracking"
 
-// Preferences framework (Settings process only). The class is resolved at
-// runtime with objc_getClass so the SpringBoard slice keeps no PS link deps.
-@class PSSpecifier;
-
-@interface PSSpecifier (AxsHoldLaunchDecls)
+// Preferences framework (Settings process only). Declaring the interface is
+// safe; the class must only ever be resolved at runtime (objc_getClass), never
+// referenced by name, so the SpringBoard slice keeps no PS link dependency.
+@interface PSSpecifier : NSObject
 + (instancetype)preferenceSpecifierNamed:(NSString *)name target:(id)target set:(SEL)set get:(SEL)get detail:(id)detail cell:(NSInteger)cell edit:(id)edit;
 - (void)setProperty:(id)property forKey:(NSString *)key;
 - (id)propertyForKey:(NSString *)key;
