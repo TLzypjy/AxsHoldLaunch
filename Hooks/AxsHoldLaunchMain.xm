@@ -167,6 +167,15 @@ static NSString * const AxsHoldLaunchKeyEnabled = @"HoldPressEnabled";
 static NSString * const AxsHoldLaunchKeyThreshold = @"HoldPressThreshold";
 static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
 
+// PSSpecifier is resolved at runtime; direct class references would break
+// linking for the SpringBoard slice.
+static PSSpecifier *axs_holdlaunch_specifier(NSString *name, id target, SEL set, SEL get) {
+    Class PSSpecifierClass = objc_getClass("PSSpecifier");
+    return ((PSSpecifier *(*)(id, SEL, NSString *, id, SEL, SEL, id, NSInteger, id))objc_msgSend)(
+        PSSpecifierClass, @selector(preferenceSpecifierNamed:target:set:get:detail:cell:edit:),
+        name, target, set, get, nil, 1, nil);
+}
+
 %group AxsHoldLaunchSettings
 
 // ScreenCore preference bundle controller (loaded only in the Settings process).
@@ -208,24 +217,15 @@ static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
 
 %new
 - (NSArray *)axs_holdlaunch_injectedSpecifiers {
-    PSSpecifier *enabled = [PSSpecifier preferenceSpecifierNamed:@"长按松手触发"
-                                                          target:self
-                                                            set:@selector(axs_holdlaunch_writeValue:forSpecifier:)
-                                                            get:@selector(axs_holdlaunch_readValueForSpecifier:)
-                                                          detail:nil
-                                                            cell:1
-                                                            edit:nil];
+    SEL setSel = @selector(axs_holdlaunch_writeValue:forSpecifier:);
+    SEL getSel = @selector(axs_holdlaunch_readValueForSpecifier:);
+
+    PSSpecifier *enabled = axs_holdlaunch_specifier(@"长按松手触发", self, setSel, getSel);
     [enabled setProperty:AxsHoldLaunchKeyEnabled forKey:@"key"];
     [enabled setProperty:@"PSSwitchCell" forKey:@"cellClass"];
     [enabled setIdentifier:@"axsHoldLaunchEnabledSpecifier"];
 
-    PSSpecifier *threshold = [PSSpecifier preferenceSpecifierNamed:@"长按触发时间"
-                                                           target:self
-                                                             set:@selector(axs_holdlaunch_writeValue:forSpecifier:)
-                                                             get:@selector(axs_holdlaunch_readValueForSpecifier:)
-                                                           detail:nil
-                                                             cell:1
-                                                             edit:nil];
+    PSSpecifier *threshold = axs_holdlaunch_specifier(@"长按触发时间", self, setSel, getSel);
     [threshold setProperty:AxsHoldLaunchKeyThreshold forKey:@"key"];
     [threshold setProperty:@"PSSliderCell" forKey:@"cellClass"];
     [threshold setProperty:@(0.1) forKey:@"min"];
@@ -233,13 +233,7 @@ static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
     [threshold setProperty:@YES forKey:@"showValue"];
     [threshold setIdentifier:@"axsHoldLaunchThresholdSpecifier"];
 
-    PSSpecifier *reverse = [PSSpecifier preferenceSpecifierNamed:@"反转长按动作"
-                                                          target:self
-                                                            set:@selector(axs_holdlaunch_writeValue:forSpecifier:)
-                                                            get:@selector(axs_holdlaunch_readValueForSpecifier:)
-                                                          detail:nil
-                                                            cell:1
-                                                            edit:nil];
+    PSSpecifier *reverse = axs_holdlaunch_specifier(@"反转长按动作", self, setSel, getSel);
     [reverse setProperty:AxsHoldLaunchKeyReverse forKey:@"key"];
     [reverse setProperty:@"PSSwitchCell" forKey:@"cellClass"];
     [reverse setIdentifier:@"axsHoldLaunchReverseSpecifier"];
