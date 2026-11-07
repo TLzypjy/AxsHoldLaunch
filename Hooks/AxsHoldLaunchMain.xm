@@ -171,6 +171,9 @@ static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
 
 // ScreenCore preference bundle controller (loaded only in the Settings process).
 @interface SCSplitSettingsController : PSListController
+- (NSArray *)axs_holdlaunch_injectedSpecifiers;
+- (id)axs_holdlaunch_readValueForSpecifier:(PSSpecifier *)spec;
+- (void)axs_holdlaunch_writeValue:(id)value forSpecifier:(PSSpecifier *)spec;
 @end
 
 %hook SCSplitSettingsController
