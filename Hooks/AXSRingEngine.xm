@@ -156,44 +156,51 @@ void axs_ring_noteContainer(id view, id hostWindow, BOOL docked) {
 }
 
 // sc_sessionForContainerView: - the authoritative container<->session pairing
-void axs_ring_noteContainerForSession(id container, id session) {
-    if (![container isKindOfClass:[UIView class]] || session == nil) return;
+// Session-taking C APIs take raw words: callers gate on the hooked method's
+// runtime type encoding, and bridging here would let ARC retain a primitive.
+void axs_ring_noteContainerForSession(void *container, void *session) {
+    if (container == NULL || session == NULL) return;
+    id containerView = (__bridge id)container;
+    id sessionObject = (__bridge id)session;
+    if (![containerView isKindOfClass:[UIView class]]) return;
     axs_ring_ensureMaps();
-    NSString *key = [NSString stringWithFormat:@"c%@", axs_ring_keyFor(container)];
+    NSString *key = [NSString stringWithFormat:@"c%@", axs_ring_keyFor(containerView)];
     NSMutableDictionary *m = axs_meta[key];
     if (m == nil) {
         m = [NSMutableDictionary new];
         axs_meta[key] = m;
         m[@"kind"] = @"float";
     }
-    NSString *sessionKey = axs_ring_keyFor(session);
+    NSString *sessionKey = axs_ring_keyFor(sessionObject);
     m[@"session"] = sessionKey;
-    m[@"sessionPtr"] = [NSValue valueWithPointer:(__bridge const void *)session];
+    m[@"sessionPtr"] = [NSValue valueWithPointer:session];
     m[@"docked"] = @NO;
     NSString *bundle = axs_sessionBundles[sessionKey];
     if (bundle != nil && ![m[@"bundle"] isEqualToString:bundle]) {
         m[@"bundle"] = bundle;
         m[@"excluded"] = nil; // re-evaluate exclusion for the new app
     }
-    UIWindow *host = [(UIView *)container window] ?: [axs_hosts objectForKey:key];
+    UIWindow *host = containerView.window ?: [axs_hosts objectForKey:key];
     if (host != nil) [axs_hosts setObject:host forKey:key];
     axs_ring_engine_log(@"ring container noted: session=%p host=%p bounds=%@",
-                        session, host, NSStringFromCGRect([(UIView *)container bounds]));
+                        session, host, NSStringFromCGRect(containerView.bounds));
     axs_ring_engine_wake();
 }
 
 // sessionForBundleIdentifier: / setSelectedBundleIdentifier: feed
-void axs_ring_setSessionBundle(id session, NSString *bundle) {
-    if (session == nil || ![bundle isKindOfClass:[NSString class]]) return;
+void axs_ring_setSessionBundle(void *session, void *bundle) {
+    if (session == NULL || bundle == NULL) return;
+    NSString *bundleString = (__bridge id)bundle;
+    if (![bundleString isKindOfClass:[NSString class]]) return;
     axs_ring_ensureMaps();
-    NSString *sessionKey = axs_ring_keyFor(session);
-    if ([axs_sessionBundles[sessionKey] isEqualToString:bundle]) return;
-    axs_sessionBundles[sessionKey] = bundle;
+    NSString *sessionKey = axs_ring_keyFor((__bridge id)session);
+    if ([axs_sessionBundles[sessionKey] isEqualToString:bundleString]) return;
+    axs_sessionBundles[sessionKey] = bundleString;
     for (NSString *key in [axs_meta allKeys]) {
         NSMutableDictionary *m = axs_meta[key];
         if (![m[@"session"] isEqualToString:sessionKey]) continue;
-        if (![m[@"bundle"] isEqualToString:bundle]) {
-            m[@"bundle"] = bundle;
+        if (![m[@"bundle"] isEqualToString:bundleString]) {
+            m[@"bundle"] = bundleString;
             m[@"excluded"] = nil;
         }
     }
@@ -201,10 +208,12 @@ void axs_ring_setSessionBundle(id session, NSString *bundle) {
 }
 
 // sc_sessionDidBeginHosting: - try to bind the session's own container view
-void axs_ring_sessionHostingBegan(id session) {
-    if (![session isKindOfClass:[NSObject class]]) return;
+void axs_ring_sessionHostingBegan(void *session) {
+    if (session == NULL) return;
+    id sessionObject = (__bridge id)session;
+    if (![sessionObject isKindOfClass:[NSObject class]]) return;
     id container = nil;
-    @try { container = [session valueForKey:@"containerView"]; } @catch (NSException *e) { }
+    @try { container = [sessionObject valueForKey:@"containerView"]; } @catch (NSException *e) { }
     if ([container isKindOfClass:[UIView class]]) {
         axs_ring_noteContainerForSession(container, session);
     }
@@ -212,9 +221,9 @@ void axs_ring_sessionHostingBegan(id session) {
 }
 
 // sc_closeSession: - drop the session's entries
-void axs_ring_sessionClosed(id session) {
-    if (session == nil || axs_meta == nil) return;
-    NSString *sessionKey = axs_ring_keyFor(session);
+void axs_ring_sessionClosed(void *session) {
+    if (session == NULL || axs_meta == nil) return;
+    NSString *sessionKey = axs_ring_keyFor((__bridge id)session);
     NSUInteger removed = 0;
     for (NSString *key in [axs_meta allKeys]) {
         NSMutableDictionary *m = axs_meta[key];
@@ -236,19 +245,19 @@ void axs_ring_sessionClosed(id session) {
 // the ring detach/rebuild in a loop and never show). The only useful thing
 // here is registering the docked mini item view when the session exposes one;
 // docked minis otherwise register themselves via -didMoveToWindow.
-void axs_ring_sessionDocked(id session) {
-    if (session == nil) return;
+void axs_ring_sessionDocked(void *session) {
+    if (session == NULL) return;
     axs_ring_ensureMaps();
-    NSString *sessionKey = axs_ring_keyFor(session);
+    NSString *sessionKey = axs_ring_keyFor((__bridge id)session);
     id item = nil;
-    @try { item = [session valueForKey:@"dockedItemView"]; } @catch (NSException *e) { }
+    @try { item = [(__bridge id)session valueForKey:@"dockedItemView"]; } @catch (NSException *e) { }
     if (![item isKindOfClass:[UIView class]]) {
-        @try { item = [session valueForKey:@"dockedItem"]; } @catch (NSException *e) { }
+        @try { item = [(__bridge id)session valueForKey:@"dockedItem"]; } @catch (NSException *e) { }
     }
     if ([item isKindOfClass:[UIView class]]) {
         NSString *key = [NSString stringWithFormat:@"d%@", axs_ring_keyFor(item)];
         [axs_views setObject:item forKey:key];
-        UIWindow *itemWindow = [(UIView *)item window];
+        UIWindow *itemWindow = [item window];
         if (itemWindow != nil) [axs_hosts setObject:itemWindow forKey:key];
         NSMutableDictionary *m = axs_meta[key];
         if (m == nil) {
@@ -257,7 +266,7 @@ void axs_ring_sessionDocked(id session) {
             m[@"kind"] = @"docked";
         }
         m[@"session"] = sessionKey;
-        m[@"sessionPtr"] = [NSValue valueWithPointer:(__bridge const void *)session];
+        m[@"sessionPtr"] = [NSValue valueWithPointer:session];
         NSString *bundle = axs_sessionBundles[sessionKey];
         if (bundle != nil && ![m[@"bundle"] isEqualToString:bundle]) {
             m[@"bundle"] = bundle;
@@ -322,8 +331,8 @@ static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
     if (!drawThis || host == nil) return;
 
     CGRect frame = [view convertRect:view.bounds toView:host];
-    CGFloat radius = docked ? view.layer.cornerRadius : [config axs_holdlaunch_splitWindowCornerRadius];
-    if (docked && radius < 1) radius = 14.0;
+    CGFloat radius = view.layer.cornerRadius;
+    if (radius < 1) radius = docked ? 14.0 : [config axs_holdlaunch_splitWindowCornerRadius];
 
     NSMutableArray<CALayer *> *layers = [NSMutableArray array];
     CGFloat z = 9999.0; // above the floating content inside its own window
@@ -341,7 +350,10 @@ static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
     }
     CGFloat frameAlpha = [config axs_holdlaunch_ringFrameAlpha];
 
-    // 外框: width 0-30 (default 2), alpha 0-1 (default 0.5)
+    // 外框 + 泛光 in ONE layer: the stroke is the ring, the layer's Gaussian
+    // shadow is the glow (a real blur - the previous separate thick stroke
+    // read as a fat band, not a glow). shadowRadius = 泛光范围, shadowOffset
+    // = 泛光偏移.
     {
         CAShapeLayer *ring = [CAShapeLayer layer];
         ring.path = axs_ring_path(frame, radius).CGPath;
@@ -350,25 +362,15 @@ static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
         ring.lineWidth = [config axs_holdlaunch_ringFrameWidth];
         ring.opacity = (float)frameAlpha;
         ring.zPosition = z;
+        if ([config axs_holdlaunch_ringGlowEnabled]) {
+            ring.shadowColor = ringColor.CGColor;
+            ring.shadowOpacity = 0.85;
+            ring.shadowRadius = [config axs_holdlaunch_ringGlowRange];
+            ring.shadowOffset = CGSizeMake([config axs_holdlaunch_ringGlowOffsetX],
+                                           -[config axs_holdlaunch_ringGlowOffsetY]);
+        }
         [host.layer addSublayer:ring];
         [layers addObject:ring];
-    }
-
-    // 光晕: spread = range 0-50 (default 6), same hue as the frame, offsets
-    if ([config axs_holdlaunch_ringGlowEnabled]) {
-        CGRect glowFrame = CGRectOffset(frame,
-                                        [config axs_holdlaunch_ringGlowOffsetX],
-                                        -[config axs_holdlaunch_ringGlowOffsetY]);
-        CGFloat range = [config axs_holdlaunch_ringGlowRange];
-        CAShapeLayer *glow = [CAShapeLayer layer];
-        glow.path = axs_ring_path(glowFrame, radius).CGPath;
-        glow.strokeColor = ringColor.CGColor;
-        glow.fillColor = nil;
-        glow.lineWidth = (range < 1) ? 1 : range;
-        glow.opacity = 0.35;
-        glow.zPosition = z;
-        [host.layer addSublayer:glow];
-        [layers addObject:glow];
     }
 
     // 内圈: switch, width 1-30 (default 2), custom color, random

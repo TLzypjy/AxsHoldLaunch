@@ -65,28 +65,58 @@ static void axs_holdlaunch_log(NSString *format, ...) {
 // ---------------------------------------------------------------------------
 
 // Ring engine C API (defined in AXSRingEngine.xm); .xm compiles as ObjC++,
-// so pin C linkage to match the engine's extern "C" definitions.
+// so pin C linkage to match the engine's extern "C" definitions. Session
+// arguments travel as raw words - the engine bridges only what callers
+// already gated on the hooked method's type encoding.
 extern "C" {
-void axs_ring_setSessionBundle(id session, NSString *bundle);
-void axs_ring_noteContainerForSession(id container, id session);
+void axs_ring_setSessionBundle(void *session, void *bundle);
+void axs_ring_noteContainerForSession(void *container, void *session);
 void axs_ring_noteContainer(id view, id hostWindow, BOOL docked);
-void axs_ring_sessionHostingBegan(id session);
-void axs_ring_sessionClosed(id session);
-void axs_ring_sessionDocked(id session);
+void axs_ring_sessionHostingBegan(void *session);
+void axs_ring_sessionClosed(void *session);
+void axs_ring_sessionDocked(void *session);
 void axs_ring_engine_wake(void);
 }
 
-// Main-thread gesture state; the hooks all run on the main thread.
-static NSTimeInterval axs_arrivalTime = 0;
-static NSString *axs_arrivalBundle = nil;
-static NSString *axs_lastSeenBundle = nil;
-
+// Ring engine feed hooks. Every hooked method is signature-proof: arguments
+// and returns travel as raw words and are only treated as objects when the
+// method's runtime type encoding says so - an id parameter (or a returned id)
+// over a primitive gets ARC-retained and crashes (objc_retain(0x1) safe-moded
+// SpringBoard twice already).
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origGestureMode = NULL;
 static IMP axs_origArcGestureMode = NULL;
 static IMP axs_origSessionForContainerView = NULL;
 static IMP axs_origSessionForBundle = NULL;
 static IMP axs_origCloseSession = NULL;
+
+// encoding flags: bit0 = arg1 object, bit1 = arg2 object, bit2 = return object
+static char axs_encSessionForContainer = 0;
+static char axs_encSessionForBundle = 0;
+static char axs_encCloseSession = 0;
+
+static char axs_holdlaunch_encodingFlags(const char *types) {
+    if (!types) return 0;
+    char flags = 0;
+    const char *p = types;
+    if (*p == '@' || *p == '#') flags |= 4; // return object
+    if (*p == '^') p++;
+    p++;                                     // return token
+    while (*p && *p != ':') p++;
+    if (*p == ':') p++;
+    for (int i = 0; i < 2; i++) {
+        if (*p == '\0') break;
+        if (*p == '@' || *p == '#') flags |= (i == 0 ? 1 : 2);
+        if (*p == '^') p++;
+        p++;
+    }
+    return flags;
+}
+
+// Main-thread gesture state; the hooks all run on the main thread.
+static NSTimeInterval axs_arrivalTime = 0;
+static NSString *axs_arrivalBundle = nil;
+static NSString *axs_lastSeenBundle = nil;
 
 static void axs_holdlaunch_recordArrival(NSString *bundle) {
     if (![bundle isKindOfClass:[NSString class]] || bundle.length == 0) return;
@@ -134,22 +164,29 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
     return axs_holdlaunch_gestureMode_imp(self, _cmd, axs_origArcGestureMode);
 }
 
-// Ring engine feed hooks (all signature-safe: object args, object/void returns)
-static id axs_holdlaunch_sessionForContainerView_imp(id self, SEL _cmd, id container) {
-    id session = ((id(*)(id, SEL, id))axs_origSessionForContainerView)(self, _cmd, container);
-    axs_ring_noteContainerForSession(container, session);
+// Ring engine feed hooks (raw-word pass-through, object treatment gated on
+// the runtime type encoding - see the block comment above).
+static void *axs_holdlaunch_sessionForContainerView_imp(id self, SEL _cmd, void *container) {
+    void *session = ((void *(*)(id, SEL, void *))axs_origSessionForContainerView)(self, _cmd, container);
+    if ((axs_encSessionForContainer & 1) && (axs_encSessionForContainer & 4)) {
+        axs_ring_noteContainerForSession((__bridge id)container, (__bridge id)session);
+    }
     return session;
 }
 
-static id axs_holdlaunch_sessionForBundle_imp(id self, SEL _cmd, id bundleIdentifier) {
-    id session = ((id(*)(id, SEL, id))axs_origSessionForBundle)(self, _cmd, bundleIdentifier);
-    axs_ring_setSessionBundle(session, bundleIdentifier);
+static void *axs_holdlaunch_sessionForBundle_imp(id self, SEL _cmd, void *bundleIdentifier) {
+    void *session = ((void *(*)(id, SEL, void *))axs_origSessionForBundle)(self, _cmd, bundleIdentifier);
+    if ((axs_encSessionForBundle & 1) && (axs_encSessionForBundle & 4)) {
+        axs_ring_setSessionBundle((__bridge id)session, (__bridge id)bundleIdentifier);
+    }
     return session;
 }
 
-static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, id session, BOOL animated) {
-    axs_ring_sessionClosed(session);
-    ((void(*)(id, SEL, id, BOOL))axs_origCloseSession)(self, _cmd, session, animated);
+static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, void *session, void *animated) {
+    if (axs_encCloseSession & 1) {
+        axs_ring_sessionClosed((__bridge id)session);
+    }
+    ((void(*)(id, SEL, void *, void *))axs_origCloseSession)(self, _cmd, session, animated);
 }
 
 // sc_dockSession:fromCorner: is declared by TWO ScreenCore classes, so the
@@ -158,18 +195,21 @@ static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, id session, BOOL 
 static Class axs_dockHookedClasses[4];
 static IMP axs_dockOrigImps[4];
 static int axs_dockHookedCount = 0;
+static char axs_encDockSession = 0;
 
-static id axs_holdlaunch_dockSession_imp(id self, SEL _cmd, id session, unsigned long fromCorner) {
+static void *axs_holdlaunch_dockSession_imp(id self, SEL _cmd, void *session, void *fromCorner) {
     Class cls = object_getClass(self);
     IMP orig = NULL;
     for (int i = 0; i < axs_dockHookedCount; i++) {
         if (axs_dockHookedClasses[i] == cls) { orig = axs_dockOrigImps[i]; break; }
     }
-    axs_ring_sessionDocked(session);
-    if (orig != NULL) {
-        return ((id(*)(id, SEL, id, unsigned long))orig)(self, _cmd, session, fromCorner);
+    if (axs_encDockSession & 1) {
+        axs_ring_sessionDocked((__bridge id)session);
     }
-    return nil;
+    if (orig != NULL) {
+        return ((void *(*)(id, SEL, void *, void *))orig)(self, _cmd, session, fromCorner);
+    }
+    return NULL;
 }
 
 // didMoveToWindow hooks: the ring registry's primary feed. A floating
@@ -197,7 +237,7 @@ static BOOL axs_hostingArgIsObject = NO;
 
 static void axs_holdlaunch_hostingBegan_imp(id self, SEL _cmd, void *arg) {
     if (axs_origHostingBegan) ((void(*)(id, SEL, void *))axs_origHostingBegan)(self, _cmd, arg);
-    if (axs_hostingArgIsObject) axs_ring_sessionHostingBegan((__bridge id)arg);
+    if (axs_hostingArgIsObject) axs_ring_sessionHostingBegan(arg);
 }
 
 // Hook -didMoveToWindow on exactly these two ScreenCore classes. Hooking the
@@ -275,6 +315,21 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger sessionForContainerCount = axs_holdlaunch_hookSelector(@selector(sc_sessionForContainerView:), (IMP)axs_holdlaunch_sessionForContainerView_imp, &axs_origSessionForContainerView);
     NSUInteger sessionForBundleCount = axs_holdlaunch_hookSelector(@selector(sc_sessionForBundleIdentifier:), (IMP)axs_holdlaunch_sessionForBundle_imp, &axs_origSessionForBundle);
     NSUInteger closeSessionCount = axs_holdlaunch_hookSelector(@selector(sc_closeSession:animated:), (IMP)axs_holdlaunch_closeSession_imp, &axs_origCloseSession);
+
+    // capture each method's real encoding before hooking: the IMPs only touch
+    // arguments/returns that the encoding says are objects
+    for (Class c in axs_holdlaunch_classesDeclaring(@selector(sc_sessionForContainerView:))) {
+        axs_encSessionForContainer = axs_holdlaunch_encodingFlags(method_getTypeEncoding(class_getInstanceMethod(c, @selector(sc_sessionForContainerView:))));
+        break;
+    }
+    for (Class c in axs_holdlaunch_classesDeclaring(@selector(sc_sessionForBundleIdentifier:))) {
+        axs_encSessionForBundle = axs_holdlaunch_encodingFlags(method_getTypeEncoding(class_getInstanceMethod(c, @selector(sc_sessionForBundleIdentifier:))));
+        break;
+    }
+    for (Class c in axs_holdlaunch_classesDeclaring(@selector(sc_closeSession:animated:))) {
+        axs_encCloseSession = axs_holdlaunch_encodingFlags(method_getTypeEncoding(class_getInstanceMethod(c, @selector(sc_closeSession:animated:))));
+        break;
+    }
     // verify sc_sessionDidBeginHosting:'s first argument is an object before
     // treating it as a session (types = ret, ':', arg1, ...)
     for (Class hostingCls in axs_holdlaunch_classesDeclaring(@selector(sc_sessionDidBeginHosting:))) {
@@ -293,6 +348,9 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
         if (axs_dockHookedCount >= 4) break;
         Method m = class_getInstanceMethod(dockCls, @selector(sc_dockSession:fromCorner:));
         if (!m) continue;
+        if (axs_dockHookedCount == 0) {
+            axs_encDockSession = axs_holdlaunch_encodingFlags(method_getTypeEncoding(m));
+        }
         axs_dockHookedClasses[axs_dockHookedCount] = dockCls;
         axs_dockOrigImps[axs_dockHookedCount] = method_getImplementation(m);
         axs_dockHookedCount++;
