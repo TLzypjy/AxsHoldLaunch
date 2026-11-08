@@ -63,6 +63,7 @@ static NSTimeInterval axs_arrivalTime = 0;        // when the current icon becam
 static NSString *axs_arrivalBundle = nil;         // bundle id selected at axs_arrivalTime
 static NSString *axs_lastSeenBundle = nil;
 static NSString *axs_lastARCBundle = nil;         // last bundle opened through a user gesture
+static NSString *axs_activeFloatingBundle = nil;  // bundle whose floating window is currently up
 
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origGestureMode = NULL;
@@ -73,7 +74,6 @@ static IMP axs_origSessionFor = NULL;
 // sessions without knowing the manager's class beyond its selector surface.
 static __weak id axs_sessionManager = nil;
 static BOOL axs_sessionManagerLogged = NO;
-static NSString *axs_dockedSourceBundle = nil;   // where a jump came from (return target)
 
 static void axs_holdlaunch_closeSessionForBundle(NSString *bundleIdentifier, NSString *reason) {
     id manager = axs_sessionManager;
@@ -146,11 +146,6 @@ static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     // can tell user opens (matching) from programmatic jumps (mismatched).
     if (axs_holdlaunch_isRealAppBundle(bundle)) {
         axs_lastARCBundle = bundle;
-        // User reopened the docked source themselves: no return-to-close.
-        if (axs_dockedSourceBundle.length > 0
-            && [bundle isEqualToString:axs_dockedSourceBundle]) {
-            axs_dockedSourceBundle = nil;
-        }
     }
     if (axs_arrivalTime > 0 && [bundle isEqualToString:axs_arrivalBundle]) {
         axs_holdlaunch_log(@"arrival(set) bundle=%@", bundle);
@@ -208,36 +203,29 @@ static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) 
     }
     if (axs_holdlaunch_isRealAppBundle(bundleIdentifier)) {
         // Jump/callback flows never fire setSelectedBundleIdentifier:, while
-        // user-gesture opens always do. A session lookup for an unexpected
-        // bundle therefore means a programmatic jump.
+        // user-gesture opens always do. A session lookup for a bundle other
+        // than the last user-opened one therefore means a programmatic jump:
+        // dock (single-window mode) or close the CURRENTLY floating window.
+        // The target is the tracked active floating window, NOT the stale
+        // setter record - jump flows bypass the setter entirely.
         AxsHoldLaunchConfig *config = [AxsHoldLaunchConfig axs_holdlaunch_shared];
         BOOL gated = [config axs_holdlaunch_isTheirCallbackCloseEnabled]
                   || [config axs_holdlaunch_isTheirSingleWindowEnabled];
-        BOOL returning = axs_dockedSourceBundle.length > 0
-            && [bundleIdentifier isEqualToString:axs_dockedSourceBundle];
-        if (gated && returning) {
-            // Back to the app we docked when jumping out: close the jumped
-            // window (payment done, conversion finished).
-            axs_holdlaunch_log(@"return detected: %@ (jumped window %@)",
-                               bundleIdentifier, axs_lastARCBundle);
-            axs_holdlaunch_closeSessionForBundle(axs_lastARCBundle, @"return-from-jump");
-            axs_lastARCBundle = bundleIdentifier;
-            axs_dockedSourceBundle = nil;
-        } else if (gated
-            && axs_lastARCBundle.length > 0
-            && ![bundleIdentifier isEqualToString:axs_lastARCBundle]) {
+        BOOL userOpen = [bundleIdentifier isEqualToString:axs_lastARCBundle];
+        NSString *previous = axs_activeFloatingBundle;
+        if (gated
+            && !userOpen
+            && previous.length > 0
+            && ![bundleIdentifier isEqualToString:previous]) {
             if ([config axs_holdlaunch_isTheirSingleWindowEnabled]) {
-                // Single-window mode: dock the previous window to the side
-                // instead of closing or leaving it stacked underneath.
-                axs_holdlaunch_dockSessionForBundle(axs_lastARCBundle,
+                axs_holdlaunch_dockSessionForBundle(previous,
                     [NSString stringWithFormat:@"jumped-to:%@", bundleIdentifier]);
-                axs_dockedSourceBundle = bundleIdentifier;
-            } else if ([config axs_holdlaunch_isTheirCallbackCloseEnabled]) {
-                axs_holdlaunch_closeSessionForBundle(axs_lastARCBundle,
+            } else {
+                axs_holdlaunch_closeSessionForBundle(previous,
                     [NSString stringWithFormat:@"jumped-to:%@", bundleIdentifier]);
             }
-            axs_lastARCBundle = bundleIdentifier;
         }
+        axs_activeFloatingBundle = bundleIdentifier;
     }
     return ((id(*)(id, SEL, id))axs_origSessionFor)(self, _cmd, bundleIdentifier);
 }
