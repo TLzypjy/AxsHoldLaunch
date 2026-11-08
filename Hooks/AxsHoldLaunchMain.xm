@@ -73,6 +73,7 @@ static IMP axs_origSessionFor = NULL;
 // sessions without knowing the manager's class beyond its selector surface.
 static __weak id axs_sessionManager = nil;
 static BOOL axs_sessionManagerLogged = NO;
+static NSString *axs_dockedSourceBundle = nil;   // where a jump came from (return target)
 
 static void axs_holdlaunch_closeSessionForBundle(NSString *bundleIdentifier, NSString *reason) {
     id manager = axs_sessionManager;
@@ -81,6 +82,47 @@ static void axs_holdlaunch_closeSessionForBundle(NSString *bundleIdentifier, NSS
     if (session == nil) return;
     ((void(*)(id, SEL, id, BOOL))objc_msgSend)(manager, @selector(sc_closeSession:animated:), session, YES);
     axs_holdlaunch_log(@"auto-closed floating window bundle=%@ reason=%@", bundleIdentifier, reason);
+}
+
+// Dock (minimize to the side) a session via ScreenCore's own single-window
+// dock method. The method's arity is verified from its type encoding before
+// calling; an unrecognized signature falls back to closing.
+static void axs_holdlaunch_dockSessionForBundle(NSString *bundleIdentifier, NSString *reason) {
+    id manager = axs_sessionManager;
+    if (manager == nil || bundleIdentifier.length == 0) return;
+    SEL selDock = @selector(sc_dockSessionForSingleActiveWindow:);
+    Method dockMethod = class_getInstanceMethod([manager class], selDock);
+    if (!dockMethod) {
+        axs_holdlaunch_log(@"dock unavailable (selector missing), closing %@ instead", bundleIdentifier);
+        axs_holdlaunch_closeSessionForBundle(bundleIdentifier, reason);
+        return;
+    }
+    id session = ((id(*)(id, SEL, id))objc_msgSend)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
+    if (session == nil) return;
+    NSString *encoding = [NSString stringWithUTF8String:method_getTypeEncoding(dockMethod)];
+    // enc starts with "@@:" (return, self, cmd); extra argument chars follow.
+    NSUInteger extra = encoding.length > 3 ? encoding.length - 3 : 0;
+    if (extra == 0) {
+        ((void(*)(id, SEL, id))objc_msgSend)(manager, selDock, session);
+    } else if (extra == 1) {
+        char arg = [encoding characterAtIndex:3];
+        if (arg == '@') {
+            ((void(*)(id, SEL, id, id))objc_msgSend)(manager, selDock, session, nil);
+        } else if (arg == 'c' || arg == 'B') {
+            ((void(*)(id, SEL, id, BOOL))objc_msgSend)(manager, selDock, session, YES);
+        } else if (arg == 'q' || arg == 'l' || arg == 'i' || arg == 'I' || arg == 'Q' || arg == 'L' || arg == 's' || arg == 'S') {
+            ((void(*)(id, SEL, id, long))objc_msgSend)(manager, selDock, session, 0);
+        } else {
+            axs_holdlaunch_log(@"dock encoding %@ unsupported, closing %@ instead", encoding, bundleIdentifier);
+            axs_holdlaunch_closeSessionForBundle(bundleIdentifier, reason);
+            return;
+        }
+    } else {
+        axs_holdlaunch_log(@"dock encoding %@ unsupported, closing %@ instead", encoding, bundleIdentifier);
+        axs_holdlaunch_closeSessionForBundle(bundleIdentifier, reason);
+        return;
+    }
+    axs_holdlaunch_log(@"docked floating window bundle=%@ reason=%@", bundleIdentifier, reason);
 }
 
 static BOOL axs_holdlaunch_isRealAppBundle(NSString *bundle) {
@@ -104,6 +146,11 @@ static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     // can tell user opens (matching) from programmatic jumps (mismatched).
     if (axs_holdlaunch_isRealAppBundle(bundle)) {
         axs_lastARCBundle = bundle;
+        // User reopened the docked source themselves: no return-to-close.
+        if (axs_dockedSourceBundle.length > 0
+            && [bundle isEqualToString:axs_dockedSourceBundle]) {
+            axs_dockedSourceBundle = nil;
+        }
     }
     if (axs_arrivalTime > 0 && [bundle isEqualToString:axs_arrivalBundle]) {
         axs_holdlaunch_log(@"arrival(set) bundle=%@", bundle);
@@ -162,19 +209,33 @@ static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) 
     if (axs_holdlaunch_isRealAppBundle(bundleIdentifier)) {
         // Jump/callback flows never fire setSelectedBundleIdentifier:, while
         // user-gesture opens always do. A session lookup for an unexpected
-        // bundle therefore means a programmatic jump: repair ScreenCore's
-        // callback close by closing the previously user-opened floating
-        // window (single-window demote / payment-callback close).
-        BOOL gated = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isTheirCallbackCloseEnabled]
-                  || [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isTheirSingleWindowEnabled];
-        if (gated
+        // bundle therefore means a programmatic jump.
+        AxsHoldLaunchConfig *config = [AxsHoldLaunchConfig axs_holdlaunch_shared];
+        BOOL gated = [config axs_holdlaunch_isTheirCallbackCloseEnabled]
+                  || [config axs_holdlaunch_isTheirSingleWindowEnabled];
+        BOOL returning = axs_dockedSourceBundle.length > 0
+            && [bundleIdentifier isEqualToString:axs_dockedSourceBundle];
+        if (gated && returning) {
+            // Back to the app we docked when jumping out: close the jumped
+            // window (payment done, conversion finished).
+            axs_holdlaunch_log(@"return detected: %@ (jumped window %@)",
+                               bundleIdentifier, axs_lastARCBundle);
+            axs_holdlaunch_closeSessionForBundle(axs_lastARCBundle, @"return-from-jump");
+            axs_lastARCBundle = bundleIdentifier;
+            axs_dockedSourceBundle = nil;
+        } else if (gated
             && axs_lastARCBundle.length > 0
             && ![bundleIdentifier isEqualToString:axs_lastARCBundle]) {
-            axs_holdlaunch_log(@"jump detected: %@ (expected %@)", bundleIdentifier, axs_lastARCBundle);
-            axs_holdlaunch_closeSessionForBundle(axs_lastARCBundle,
-                [NSString stringWithFormat:@"jumped-to:%@", bundleIdentifier]);
-        }
-        if (gated) {
+            if ([config axs_holdlaunch_isTheirSingleWindowEnabled]) {
+                // Single-window mode: dock the previous window to the side
+                // instead of closing or leaving it stacked underneath.
+                axs_holdlaunch_dockSessionForBundle(axs_lastARCBundle,
+                    [NSString stringWithFormat:@"jumped-to:%@", bundleIdentifier]);
+                axs_dockedSourceBundle = bundleIdentifier;
+            } else if ([config axs_holdlaunch_isTheirCallbackCloseEnabled]) {
+                axs_holdlaunch_closeSessionForBundle(axs_lastARCBundle,
+                    [NSString stringWithFormat:@"jumped-to:%@", bundleIdentifier]);
+            }
             axs_lastARCBundle = bundleIdentifier;
         }
     }
