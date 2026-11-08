@@ -298,7 +298,7 @@ static void axs_holdlaunch_colorButtonTapped_imp(id self, SEL _cmd, id sender) {
 static IMP axs_origCellForRow = NULL;
 
 static id axs_cellForRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
-    id cell = ((id(*)(id, SEL, id, id))axs_origCellForRow)(self, _cmd, tableView, indexPath);
+    UITableViewCell *cell = ((UITableViewCell *(*)(id, SEL, id, id))axs_origCellForRow)(self, _cmd, tableView, indexPath);
     @try {
         NSString *key = nil;
         if ([self respondsToSelector:@selector(specifierAtIndexPath:)]) {
