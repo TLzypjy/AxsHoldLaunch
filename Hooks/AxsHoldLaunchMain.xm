@@ -244,13 +244,6 @@ static double axs_holdlaunch_quantizeThreshold(double value) {
     return v;
 }
 
-static NSString *axs_holdlaunch_colorToHex(UIColor *color) {
-    CGFloat r = 0, g = 0, b = 0, a = 0;
-    if (![color getRed:&r green:&g blue:&b alpha:&a]) return @"#FFFFFF";
-    return [NSString stringWithFormat:@"#%02X%02X%02X",
-            (int)round(r * 255), (int)round(g * 255), (int)round(b * 255)];
-}
-
 static id axs_readPreferenceValue_imp(id self, SEL _cmd, id specifier) {
     id value = ((id(*)(id, SEL, id))axs_origReadPrefValue)(self, _cmd, specifier);
     NSString *key = [specifier propertyForKey:@"key"];
