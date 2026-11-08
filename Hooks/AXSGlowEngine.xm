@@ -5,21 +5,16 @@
 // ---------------------------------------------------------------------------
 // 窗口光圈/光晕引擎 (port of TrollOpen's glow feature)
 //
-// 定时扫描 SpringBoard 的窗口，找到 ScreenCore 的浮窗宿主窗口
-// (SCFloatingHostWindow*)，在窗口层上维护两圈渐变环:
-//   - 光圈外框: 紧贴窗口边缘的渐变环 (彩虹或自定义色)
+// 定时扫描 SpringBoard 的视图层级，找到 ScreenCore 的浮窗容器
+// (SCFloatingContainerView)，在其图层上维护两圈渐变环:
+//   - 光圈外框: 紧贴浮窗边缘的渐变环 (彩虹或自定义色)
 //   - 窗口光晕: 向外扩散的柔和光晕带
-// 设置变化时下一次 tick 自动生效；窗口消失时自动摘除。
+// 颜色/开关设置变化时下一次 tick 自动生效；浮窗关闭时自动摘除。
 // ---------------------------------------------------------------------------
 
 static NSTimer *axs_glowTimer = nil;
 static NSMutableDictionary<NSString *, NSMutableArray<CALayer *> *> *axs_glowLayers = nil;
 static NSMutableDictionary<NSString *, NSString *> *axs_glowSignature = nil;
-
-@interface AXSGlowEngineTarget : NSObject
-+ (instancetype)shared;
-- (void)axsGlowTick;
-@end
 
 static UIColor *axs_glow_parseHex(NSString *hex, UIColor *fallback) {
     if (![hex isKindOfClass:[NSString class]] || hex.length == 0) return fallback;
@@ -43,14 +38,15 @@ static NSArray<UIColor *> *axs_glow_rainbow(void) {
               [UIColor purpleColor], [UIColor redColor] ];
 }
 
-static CGFloat axs_glow_contentRadius(UIWindow *window) {
-    CGFloat radius = 47.0;
-    UIView *root = window.rootViewController.view;
-    if (root.layer.cornerRadius > 1) radius = root.layer.cornerRadius;
+// 在视图层级里递归找第一个类名匹配的视图
+static UIView *axs_glow_findView(UIView *root, NSString *prefix, int depth) {
+    if (depth > 12) return nil;
+    if ([NSStringFromClass(root.class) hasPrefix:prefix]) return root;
     for (UIView *sub in root.subviews) {
-        if (sub.layer.cornerRadius > 1) { radius = sub.layer.cornerRadius; break; }
+        UIView *found = axs_glow_findView(sub, prefix, depth + 1);
+        if (found) return found;
     }
-    return radius;
+    return nil;
 }
 
 static CALayer *axs_glow_ringLayer(CGRect bounds, CGFloat radius, CGFloat outerGrow,
@@ -83,7 +79,6 @@ static CALayer *axs_glow_ringLayer(CGRect bounds, CGFloat radius, CGFloat outerG
         UIColor *col = colors[i % n];
         CGFloat alpha = 1.0;
         if (fadeOut && n > 0) {
-            // 光晕带: 从窗口边缘向外渐隐
             CGFloat t = (CGFloat)i / n;
             alpha = 0.55 * (1.0 - t * t);
         }
@@ -97,10 +92,11 @@ static CALayer *axs_glow_ringLayer(CGRect bounds, CGFloat radius, CGFloat outerG
     return ring;
 }
 
-static void axs_glow_applyToWindow(UIWindow *window, AxsHoldLaunchConfig *config) {
-    NSString *key = [NSString stringWithFormat:@"%p", window];
-    CGRect bounds = window.bounds;
-    CGFloat radius = axs_glow_contentRadius(window);
+static void axs_glow_applyToContainer(UIView *container, AxsHoldLaunchConfig *config) {
+    NSString *key = [NSString stringWithFormat:@"%p", container];
+    CGRect bounds = container.bounds;
+    CGFloat radius = container.layer.cornerRadius;
+    if (radius < 1) radius = 47.0;
 
     BOOL frameOn = [config axs_holdlaunch_glowFrameEnabled];
     BOOL haloOn = [config axs_holdlaunch_glowHaloEnabled];
@@ -112,18 +108,16 @@ static void axs_glow_applyToWindow(UIWindow *window, AxsHoldLaunchConfig *config
         return;
     }
 
-    // 生成签名: 帧圆角+颜色+开关 任一变化才重建
     UIColor *frameCol = [config axs_holdlaunch_glowFrameCustom]
         ? axs_glow_parseHex([config axs_holdlaunch_glowFrameColor], [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0])
         : nil;
     UIColor *haloCol = [config axs_holdlaunch_glowHaloCustom]
         ? axs_glow_parseHex([config axs_holdlaunch_glowHaloColor], [UIColor whiteColor])
         : nil;
-    NSString *sig = [NSString stringWithFormat:@"%.0f,%.0f,%.0f,%.0f,%.0f,%d,%d,%@,%d,%d,%@",
+    NSString *sig = [NSString stringWithFormat:@"%.0f,%.0f,%.0f,%.0f,%.0f,%d,%d,%@,%d,%@",
                      bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height,
                      radius, frameOn, [config axs_holdlaunch_glowFrameCustom],
-                     frameCol ?: @"", haloOn && [config axs_holdlaunch_glowHaloCustom],
-                     haloOn && [config axs_holdlaunch_glowHaloCustom], haloCol ?: @""];
+                     frameCol ?: @"", [config axs_holdlaunch_glowHaloCustom], haloCol ?: @""];
     if ([axs_glowSignature[key] isEqualToString:sig]) return;
     axs_glowSignature[key] = sig;
 
@@ -133,19 +127,19 @@ static void axs_glow_applyToWindow(UIWindow *window, AxsHoldLaunchConfig *config
     if (haloOn) {
         NSArray<UIColor *> *haloColors = haloCol ? @[haloCol, haloCol] : @[[UIColor whiteColor], [UIColor whiteColor]];
         CALayer *halo = axs_glow_ringLayer(bounds, radius, 16.0, haloColors, YES);
-        [window.layer addSublayer:halo];
+        [container.layer addSublayer:halo];
         [layers addObject:halo];
     }
     if (frameOn) {
         NSArray<UIColor *> *frameColors = frameCol ? @[frameCol, frameCol]
                                                    : axs_glow_rainbow();
         CALayer *ring = axs_glow_ringLayer(bounds, radius, 3.0, frameColors, NO);
-        [window.layer addSublayer:ring];
+        [container.layer addSublayer:ring];
         [layers addObject:ring];
     }
 
     [axs_glowLayers setObject:layers forKey:key];
-    objc_setAssociatedObject(window, @selector(axsGlowLayersKey), layers, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(container, @selector(axsGlowLayersKey), layers, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 static void axs_glow_tick(void) {
@@ -161,19 +155,16 @@ static void axs_glow_tick(void) {
         for (UIScene *scene in scenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-                NSString *cls = NSStringFromClass(window.class);
-                if (![cls hasPrefix:@"SCFloating"]) continue;
-                NSString *key = [NSString stringWithFormat:@"%p", window];
+                UIView *container = axs_glow_findView(window.rootViewController.view ?: window, @"SCFloatingContainerView", 0);
+                if (container == nil || container.window == nil || container.hidden ||
+                    container.frame.size.width < 40 || container.frame.size.height < 40) continue;
+                NSString *key = [NSString stringWithFormat:@"%p", container];
                 [seen addObject:key];
-                if (window.hidden) {
-                    for (CALayer *l in axs_glowLayers[key]) { [l removeFromSuperlayer]; }
-                    continue;
-                }
-                axs_glow_applyToWindow(window, config);
+                axs_glow_applyToContainer(container, config);
             }
         }
 
-        // 清理已消失窗口的图层
+        // 清理已消失容器的图层
         for (NSString *key in axs_glowLayers.allKeys.copy) {
             if (![seen containsObject:key]) {
                 for (CALayer *l in axs_glowLayers[key]) { [l removeFromSuperlayer]; }
@@ -198,6 +189,11 @@ static void axs_glow_start(void) {
         [[NSRunLoop mainRunLoop] addTimer:axs_glowTimer forMode:NSRunLoopCommonModes];
     });
 }
+
+@interface AXSGlowEngineTarget : NSObject
++ (instancetype)shared;
+- (void)axsGlowTick;
+@end
 
 @implementation AXSGlowEngineTarget
 + (instancetype)shared {

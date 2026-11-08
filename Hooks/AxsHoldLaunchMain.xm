@@ -172,13 +172,70 @@ static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
 static IMP axs_origSpecifiers = NULL;
 static IMP axs_origReadPrefValue = NULL;
 static IMP axs_origSetPrefValue = NULL;
+static IMP axs_origDidSelect = NULL;
 static BOOL axs_settingsInstalled = NO;
+
+static NSString * const AxsHoldLaunchKeyGlowFrameColor = @"GlowFrameColor";
+static NSString * const AxsHoldLaunchKeyGlowHaloColor = @"GlowHaloColor";
+
+static void axs_holdlaunch_presentColorPicker(id self, NSString *title, NSString *key) {
+    if (!objc_getClass("UIColorPickerViewController")) {
+        axs_holdlaunch_log(@"UIColorPickerViewController unavailable");
+        return;
+    }
+    UIColorPickerViewController *picker = [[objc_getClass("UIColorPickerViewController") alloc] init];
+    if ([picker respondsToSelector:@selector(setSupportsAlpha:)]) picker.supportsAlpha = NO;
+    if ([picker respondsToSelector:@selector(setInitialColor:)])
+        picker.initialColor = axs_holdlaunch_hexToColor(
+            [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_valueForKey:key defaultValue:nil],
+            [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
+    if ([picker respondsToSelector:@selector(setTitle:)]) picker.title = title;
+    objc_setAssociatedObject(picker, @selector(axsGlowColorKey), key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+static void axs_holdlaunch_colorPickerDidFinish_imp(id self, SEL _cmd, id picker) {
+    UIColor *color = nil;
+    if ([picker respondsToSelector:@selector(selectedColor)]) {
+        color = ((id(*)(id, SEL))objc_msgSend)(picker, @selector(selectedColor));
+    }
+    NSString *key = objc_getAssociatedObject(picker, @selector(axsGlowColorKey));
+    if (color && key.length > 0) {
+        NSString *hex = axs_holdlaunch_colorToHex(color);
+        NSError *error = nil;
+        axs_holdlaunch_writePreference(key, hex, &error);
+        if ([self respondsToSelector:@selector(reloadSpecifiers)]) {
+            ((void(*)(id, SEL))objc_msgSend)(self, @selector(reloadSpecifiers));
+        }
+    }
+    [picker dismissViewControllerAnimated:YES completion:nil];
+}
 
 static double axs_holdlaunch_quantizeThreshold(double value) {
     double v = round(value / 0.05) * 0.05;
     if (v < 0.2) v = 0.2;
     if (v > 5.0) v = 5.0;
     return v;
+}
+
+static UIColor *axs_holdlaunch_hexToColor(NSString *hex, UIColor *fallback) {
+    if (![hex isKindOfClass:[NSString class]] || hex.length == 0) return fallback;
+    NSString *h = [[hex stringByReplacingOccurrencesOfString:@"#" withString:@""] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (h.length != 6) return fallback;
+    unsigned int v = 0;
+    NSScanner *scanner = [NSScanner scannerWithString:h];
+    [scanner scanHexInt:&v];
+    return [UIColor colorWithRed:((v >> 16) & 0xFF) / 255.0
+                           green:((v >> 8) & 0xFF) / 255.0
+                            blue:(v & 0xFF) / 255.0
+                           alpha:1.0];
+}
+
+static NSString *axs_holdlaunch_colorToHex(UIColor *color) {
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (![color getRed:&r green:&g blue:&b alpha:&a]) return @"#FFFFFF";
+    return [NSString stringWithFormat:@"#%02X%02X%02X",
+            (int)round(r * 255), (int)round(g * 255), (int)round(b * 255)];
 }
 
 static id axs_readPreferenceValue_imp(id self, SEL _cmd, id specifier) {
@@ -196,6 +253,27 @@ static void axs_setPreferenceValue_imp(id self, SEL _cmd, id value, id specifier
         value = @(axs_holdlaunch_quantizeThreshold([value doubleValue]));
     }
     ((void(*)(id, SEL, id, id))axs_origSetPrefValue)(self, _cmd, value, specifier);
+}
+
+static void axs_didSelectRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
+    @try {
+        NSString *key = nil;
+        if ([self respondsToSelector:@selector(specifierAtIndexPath:)]) {
+            PSSpecifier *spec = ((PSSpecifier *(*)(id, SEL, id))objc_msgSend)(self, @selector(specifierAtIndexPath:), indexPath);
+            key = [spec propertyForKey:@"key"];
+        }
+        if ([key isEqualToString:AxsHoldLaunchKeyGlowFrameColor]) {
+            axs_holdlaunch_presentColorPicker(self, @"光圈颜色", AxsHoldLaunchKeyGlowFrameColor);
+            return;
+        }
+        if ([key isEqualToString:AxsHoldLaunchKeyGlowHaloColor]) {
+            axs_holdlaunch_presentColorPicker(self, @"光晕颜色", AxsHoldLaunchKeyGlowHaloColor);
+            return;
+        }
+    } @catch (NSException *exception) {
+        // fall through to the original handler
+    }
+    ((void(*)(id, SEL, id, id))axs_origDidSelect)(self, _cmd, tableView, indexPath);
 }
 
 // PSSpecifier is resolved at runtime; direct class references would break
@@ -329,6 +407,20 @@ static void axs_holdlaunch_installSettingsHooks(void) {
         } else {
             MSHookMessageEx(cls, selWrite, (IMP)axs_setPreferenceValue_imp, &axs_origSetPrefValue);
         }
+    }
+
+    // Tap on a glow color row -> present the system color picker.
+    SEL selDidSelect = @selector(tableView:didSelectRowAtIndexPath:);
+    Method didSelectMethod = class_getInstanceMethod(cls, selDidSelect);
+    if (didSelectMethod) {
+        IMP didSelectOrig = method_getImplementation(didSelectMethod);
+        if (class_addMethod(cls, selDidSelect, (IMP)axs_didSelectRow_imp, method_getTypeEncoding(didSelectMethod))) {
+            axs_origDidSelect = didSelectOrig;
+        } else {
+            MSHookMessageEx(cls, selDidSelect, (IMP)axs_didSelectRow_imp, &axs_origDidSelect);
+        }
+        // Color picker completion (delegate method added to the controller).
+        class_addMethod(cls, @selector(colorPickerControllerDidFinish:), (IMP)axs_holdlaunch_colorPickerDidFinish_imp, "v@:@");
     }
     axs_settingsInstalled = YES;
     axs_holdlaunch_log(@"settings hooks installed");
