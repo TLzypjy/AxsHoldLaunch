@@ -6,20 +6,13 @@
 #import "AxsHoldLaunchPrivate.h"
 
 // ---------------------------------------------------------------------------
-// SpringBoard side
+// Hold-to-launch: ARC 菜单长按松手触发
 //
-// Signature-safe hook set only. Every hook below has a confirmed ABI:
-//   - setSelectedBundleIdentifier: receives NSString values (proven by logs)
-//   - splitGestureLaunchMode / splitArcGestureLaunchMode getters are plain
-//     long -> long (Tq in the ObjC metadata; 0 = split, 1 = fullscreen per
-//     the specifier's validValues)
-//   - sc_routeApplicationRequestForBundleIdentifier:options:origin:forward:
-//     only bundleIdentifier is read as an object, the rest pass through as
-//     integer bits
-//   - sc_sessionForBundleIdentifier: object in, object out
-// The deep open funnel (sc_openTargetIdentifier:...launchFullscreen:) is
-// deliberately NOT hooked: two of its arguments have unconfirmed types and
-// getting them wrong crashed inside objc_retain.
+// ScreenCore 的打开方式决策读取 splitGestureLaunchMode (long: 0 = 分屏,
+// 1 = 全屏, 见设置页 validValues)。本 tweak 只做两件事:
+//   1. setSelectedBundleIdentifier: 记录手指落到菜单图标的时刻 (dwell 起点)
+//   2. 打开方式 getter 被决策读取时, 按 dwell >= 阈值改写返回值 (一次有效)
+// 钩子全部为签名确认安全的类型 (字符串 setter + 纯 long getter)。
 // ---------------------------------------------------------------------------
 
 static NSTimeInterval axs_holdlaunch_now(void) {
@@ -62,88 +55,10 @@ static void axs_holdlaunch_log(NSString *format, ...) {
 static NSTimeInterval axs_arrivalTime = 0;        // when the current icon became selected
 static NSString *axs_arrivalBundle = nil;         // bundle id selected at axs_arrivalTime
 static NSString *axs_lastSeenBundle = nil;
-static NSString *axs_lastARCBundle = nil;         // last bundle opened through a user gesture
-static NSString *axs_activeFloatingBundle = nil;  // bundle whose floating window is currently up
-static NSString *axs_returnTargetBundle = nil;    // jump target: returning here closes the jumper
-static int axs_sessionHookDepth = 0;              // re-entrancy guard: while our close/dock
-                                                  // helpers run, ScreenCore's own internals may
-                                                  // query sessions again - those calls must
-                                                  // pass straight through the original IMP.
 
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origGestureMode = NULL;
 static IMP axs_origArcGestureMode = NULL;
-static IMP axs_origSessionFor = NULL;
-
-// Captured from sc_sessionForBundleIdentifier: so the auto-close can resolve
-// sessions without knowing the manager's class beyond its selector surface.
-static __weak id axs_sessionManager = nil;
-static BOOL axs_sessionManagerLogged = NO;
-
-static void axs_holdlaunch_closeSessionForBundle(NSString *bundleIdentifier, NSString *reason) {
-    id manager = axs_sessionManager;
-    if (manager == nil || bundleIdentifier.length == 0) return;
-    // Resolve through the UNGHOOKED original IMP: calling the hooked selector
-    // here would re-enter our own sessionFor hook (infinite recursion).
-    id session = ((id(*)(id, SEL, id))axs_origSessionFor)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
-    if (session == nil) return;
-    axs_sessionHookDepth++;
-    ((void(*)(id, SEL, id, BOOL))objc_msgSend)(manager, @selector(sc_closeSession:animated:), session, YES);
-    axs_sessionHookDepth--;
-    axs_holdlaunch_log(@"auto-closed floating window bundle=%@ reason=%@", bundleIdentifier, reason);
-}
-
-// Dock (minimize to the side) a session via ScreenCore's own single-window
-// dock method. The method's arity is verified from its type encoding before
-// calling; an unrecognized signature falls back to closing.
-static void axs_holdlaunch_dockSessionForBundle(NSString *bundleIdentifier, NSString *reason) {
-    id manager = axs_sessionManager;
-    if (manager == nil || bundleIdentifier.length == 0) return;
-    SEL selDock = @selector(sc_dockSessionForSingleActiveWindow:);
-    Method dockMethod = class_getInstanceMethod([manager class], selDock);
-    if (!dockMethod) {
-        axs_holdlaunch_log(@"dock unavailable (selector missing), closing %@ instead", bundleIdentifier);
-        axs_holdlaunch_closeSessionForBundle(bundleIdentifier, reason);
-        return;
-    }
-    // UNGHOOKED original IMP for session resolution (no hook re-entry).
-    id session = ((id(*)(id, SEL, id))axs_origSessionFor)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
-    if (session == nil) return;
-    axs_sessionHookDepth++;
-    NSString *encoding = [NSString stringWithUTF8String:method_getTypeEncoding(dockMethod)];
-    // enc starts with "@@:" (return, self, cmd); extra argument chars follow.
-    NSUInteger extra = encoding.length > 3 ? encoding.length - 3 : 0;
-    if (extra == 0) {
-        ((void(*)(id, SEL, id))objc_msgSend)(manager, selDock, session);
-    } else if (extra == 1) {
-        char arg = [encoding characterAtIndex:3];
-        if (arg == '@') {
-            ((void(*)(id, SEL, id, id))objc_msgSend)(manager, selDock, session, nil);
-        } else if (arg == 'c' || arg == 'B') {
-            ((void(*)(id, SEL, id, BOOL))objc_msgSend)(manager, selDock, session, YES);
-        } else if (arg == 'q' || arg == 'l' || arg == 'i' || arg == 'I' || arg == 'Q' || arg == 'L' || arg == 's' || arg == 'S') {
-            ((void(*)(id, SEL, id, long))objc_msgSend)(manager, selDock, session, 0);
-        } else {
-            axs_sessionHookDepth--;
-            axs_holdlaunch_log(@"dock encoding %@ unsupported, closing %@ instead", encoding, bundleIdentifier);
-            axs_holdlaunch_closeSessionForBundle(bundleIdentifier, reason);
-            return;
-        }
-    } else {
-        axs_sessionHookDepth--;
-        axs_holdlaunch_log(@"dock encoding %@ unsupported, closing %@ instead", encoding, bundleIdentifier);
-        axs_holdlaunch_closeSessionForBundle(bundleIdentifier, reason);
-        return;
-    }
-    axs_sessionHookDepth--;
-    axs_holdlaunch_log(@"docked floating window bundle=%@ reason=%@", bundleIdentifier, reason);
-}
-
-static BOOL axs_holdlaunch_isRealAppBundle(NSString *bundle) {
-    return [bundle isKindOfClass:[NSString class]]
-        && bundle.length > 0
-        && ![bundle hasPrefix:@"system-tool:"];
-}
 
 static void axs_holdlaunch_recordArrival(NSString *bundle) {
     if (![bundle isKindOfClass:[NSString class]] || bundle.length == 0) return;
@@ -156,20 +71,11 @@ static void axs_holdlaunch_recordArrival(NSString *bundle) {
 static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     ((void(*)(id, SEL, id))axs_origSetSelectedBundle)(self, _cmd, bundle);
     axs_holdlaunch_recordArrival(bundle);
-    // A user-gesture open updates the expected bundle, so the sessionFor hook
-    // can tell user opens (matching) from programmatic jumps (mismatched).
-    if (axs_holdlaunch_isRealAppBundle(bundle)) {
-        axs_lastARCBundle = bundle;
-    }
     if (axs_arrivalTime > 0 && [bundle isEqualToString:axs_arrivalBundle]) {
         axs_holdlaunch_log(@"arrival(set) bundle=%@", bundle);
     }
 }
 
-// The open-mode decision reads splitGestureLaunchMode / splitArcGestureLaunch
-// Mode (long: 0 = split, 1 = fullscreen, per the specifier's validValues).
-// Overriding the getter avoids every unknown-type argument of the deep open
-// funnel, which crashed inside objc_retain twice.
 static long axs_holdlaunch_gestureMode_imp(id self, SEL _cmd, IMP original) {
     long mode = ((long(*)(id, SEL))original)(self, _cmd);
     if (axs_arrivalTime > 0) {
@@ -200,80 +106,20 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
     return axs_holdlaunch_gestureMode_imp(self, _cmd, axs_origArcGestureMode);
 }
 
-// ---------------------------------------------------------------------------
-// Jump/callback auto-close: when ScreenCore routes an open request to app B
-// (payment page, converter, ...) and shortly afterwards routes back to a
-// DIFFERENT app A (payment completion callback, conversion finished), close
-// the floating session of B. Uses only signature-safe hooks.
-// ---------------------------------------------------------------------------
-
-static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) {
-    if (axs_sessionHookDepth > 0) {
-        // Called from our own close/dock helpers: plain passthrough.
-        return ((id(*)(id, SEL, id))axs_origSessionFor)(self, _cmd, bundleIdentifier);
-    }
-    if (axs_sessionManager == nil) {
-        axs_sessionManager = self;
-        if (!axs_sessionManagerLogged) {
-            axs_sessionManagerLogged = YES;
-            axs_holdlaunch_log(@"session manager captured: %@", NSStringFromClass([self class]));
-        }
-    }
-    if (axs_holdlaunch_isRealAppBundle(bundleIdentifier)) {
-        // Jump/callback flows never fire setSelectedBundleIdentifier:, while
-        // user-gesture opens always do. A session lookup for a bundle other
-        // than the last user-opened one therefore means a programmatic jump:
-        // dock (single-window mode) or close the CURRENTLY floating window.
-        // The target is the tracked active floating window, NOT the stale
-        // setter record - jump flows bypass the setter entirely.
-        AxsHoldLaunchConfig *config = [AxsHoldLaunchConfig axs_holdlaunch_shared];
-        BOOL gated = [config axs_holdlaunch_isTheirCallbackCloseEnabled]
-                  || [config axs_holdlaunch_isTheirSingleWindowEnabled];
-        BOOL userOpen = [bundleIdentifier isEqualToString:axs_lastARCBundle];
-        NSString *previous = axs_activeFloatingBundle;
-        if (gated
-            && !userOpen
-            && previous.length > 0
-            && ![bundleIdentifier isEqualToString:previous]) {
-            axs_sessionHookDepth++;
-            if ([config axs_holdlaunch_isTheirSingleWindowEnabled]) {
-                axs_holdlaunch_dockSessionForBundle(previous,
-                    [NSString stringWithFormat:@"jumped-to:%@", bundleIdentifier]);
-            } else {
-                axs_holdlaunch_closeSessionForBundle(previous,
-                    [NSString stringWithFormat:@"jumped-to:%@", bundleIdentifier]);
-            }
-            axs_sessionHookDepth--;
-        }
-        axs_activeFloatingBundle = bundleIdentifier;
-    }
-    return ((id(*)(id, SEL, id))axs_origSessionFor)(self, _cmd, bundleIdentifier);
-}
-
-static IMP axs_origCloseSession = NULL;
-
-static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, id session, BOOL animated) {
-    axs_holdlaunch_log(@"closeSession <%@:%p> animated=%d",
-                       NSStringFromClass([session class]), session, animated);
-    ((void(*)(id, SEL, id, BOOL))axs_origCloseSession)(self, _cmd, session, animated);
-}
-
 static BOOL axs_springboardHooksInstalled = NO;
 
-// scanAllClasses: some ScreenCore selectors are dispatched dynamically and
-// implemented on classes outside the SC* prefix, so the prefix filter would
-// never find them (sc_routeApplicationRequest... was one).
-static NSUInteger axs_holdlaunch_hookSelectorInScope(SEL selector, IMP replacement, IMP *original, BOOL scanAllClasses) {
+static NSArray<Class> *axs_holdlaunch_classesDeclaring(SEL selector) {
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
-    if (!classes) return 0;
-    NSUInteger hooked = 0;
+    if (!classes) return @[];
+    NSMutableArray<Class> *result = [NSMutableArray array];
+    unsigned int scClasses = 0;
     for (unsigned int i = 0; i < count; i++) {
         Class cls = classes[i];
-        if (!scanAllClasses) {
-            const char *name = class_getName(cls);
-            if (strncmp(name, "SC", 2) != 0) continue;
-        }
+        // ScreenCore classes all start with SC / SCWS; limit the scan to them.
+        const char *name = class_getName(cls);
+        if (strncmp(name, "SC", 2) != 0) continue;
+        scClasses++;
         unsigned int methodCount = 0;
         Method *methods = class_copyMethodList(cls, &methodCount);
         BOOL declared = NO;
@@ -281,17 +127,20 @@ static NSUInteger axs_holdlaunch_hookSelectorInScope(SEL selector, IMP replaceme
             if (method_getName(methods[m]) == selector) { declared = YES; break; }
         }
         free(methods);
-        if (declared) {
-            MSHookMessageEx(cls, selector, replacement, original);
-            hooked++;
-        }
+        if (declared) [result addObject:cls];
     }
     free(classes);
-    return hooked;
+    axs_holdlaunch_log(@"scan '%s': %u SC classes of %u total", sel_getName(selector), scClasses, count);
+    return result;
 }
 
 static NSUInteger axs_holdlaunch_hookSelector(SEL selector, IMP replacement, IMP *original) {
-    return axs_holdlaunch_hookSelectorInScope(selector, replacement, original, NO);
+    NSUInteger hooked = 0;
+    for (Class cls in axs_holdlaunch_classesDeclaring(selector)) {
+        MSHookMessageEx(cls, selector, replacement, original);
+        hooked++;
+    }
+    return hooked;
 }
 
 static void axs_holdlaunch_installSpringBoardHooks(void) {
@@ -305,23 +154,15 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger modeCount = axs_holdlaunch_hookSelector(selMode, (IMP)axs_holdlaunch_gestureMode_imp_a, &axs_origGestureMode);
     NSUInteger arcModeCount = axs_holdlaunch_hookSelector(selArcMode, (IMP)axs_holdlaunch_gestureMode_imp_b, &axs_origArcGestureMode);
 
-    // Captures SCFloatingSceneManager so the auto-close can resolve sessions.
-    SEL selSessionFor = @selector(sc_sessionForBundleIdentifier:);
-    NSUInteger sessionForCount = axs_holdlaunch_hookSelector(selSessionFor, (IMP)axs_holdlaunch_sessionFor_imp, &axs_origSessionFor);
-    SEL selCloseSession = @selector(sc_closeSession:animated:);
-    NSUInteger closeCount = axs_holdlaunch_hookSelector(selCloseSession, (IMP)axs_holdlaunch_closeSession_imp, &axs_origCloseSession);
-
-    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu sessionFor=%lu close=%lu | callback-close gate=%d",
+    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu",
                        (unsigned long)setBundleCount,
-                       (unsigned long)modeCount, (unsigned long)arcModeCount,
-                       (unsigned long)sessionForCount, (unsigned long)closeCount,
-                       [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isTheirCallbackCloseEnabled]);
+                       (unsigned long)modeCount, (unsigned long)arcModeCount);
 }
 
 // ---------------------------------------------------------------------------
-// Settings side: the specifier rows themselves live in the patched
-// SplitSettings.plist; these hooks quantize the threshold value (input dialog
-// prefill + writes) so it never shows more than two decimals.
+// Settings side: the specifier rows live in the patched SplitSettings.plist;
+// these hooks quantize the threshold value (input dialog prefill + writes) so
+// it never shows more than two decimals.
 // ---------------------------------------------------------------------------
 
 static NSString * const AxsHoldLaunchKeyEnabled = @"HoldPressEnabled";

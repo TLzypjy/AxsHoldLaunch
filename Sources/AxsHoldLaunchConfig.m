@@ -66,23 +66,6 @@ static void axs_holdlaunch_preferencesDidChange(CFNotificationCenterRef center, 
     return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
 }
 
-- (BOOL)axs_holdlaunch_isTheirCallbackCloseEnabled {
-    // ScreenCore's own switch: com.susudear.screencoreprefs /
-    // splitCallbackAutoCloseFloatingEnabled. Read live through cfprefsd so
-    // the repair follows the original toggle exactly.
-    Boolean exists = NO;
-    Boolean enabled = CFPreferencesGetAppBooleanValue(CFSTR("splitCallbackAutoCloseFloatingEnabled"),
-                                                      CFSTR("com.susudear.screencoreprefs"), &exists);
-    return exists ? (BOOL)enabled : NO;
-}
-
-- (BOOL)axs_holdlaunch_isTheirSingleWindowEnabled {
-    Boolean exists = NO;
-    Boolean enabled = CFPreferencesGetAppBooleanValue(CFSTR("splitSingleActiveWindowEnabled"),
-                                                      CFSTR("com.susudear.screencoreprefs"), &exists);
-    return exists ? (BOOL)enabled : NO;
-}
-
 - (void)dealloc {
     CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                             (__bridge const void *)self);
