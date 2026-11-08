@@ -6,19 +6,23 @@
 #import "AxsHoldLaunchPrivate.h"
 
 // ---------------------------------------------------------------------------
-// Hold-to-launch: ARC 閼挎粌宕熼梹鎸庡瘻閺夌偓澧滅憴锕€褰?//
-// ScreenCore 閻ㄥ嫭澧﹀鈧弬鐟扮础閸愬磭鐡ョ拠璇插絿 splitGestureLaunchMode (long: 0 = 閸掑棗鐫?
-// 1 = 閸忋劌鐫? 鐟欎浇顔曠純顕€銆?validValues)閵嗗倹婀?tweak 閸欘亜浠涙稉銈勬娴?
-//   1. setSelectedBundleIdentifier: 鐠佹澘缍嶉幍瀣瘹閽€钘夊煂閼挎粌宕熼崶鐐垼閻ㄥ嫭妞傞崚?(dwell 鐠ч鍋?
-//   2. 閹垫挸绱戦弬鐟扮础 getter 鐞氼偄鍠呯粵鏍嚢閸欐牗妞? 閹?dwell >= 闂冨牆鈧吋鏁奸崘娆掔箲閸ョ偛鈧?(娑撯偓濞嗏剝婀侀弫?
-// 闁解晛鐡欓崗銊╁劥娑撹櫣顒烽崥宥団€樼拋銈呯暔閸忋劎娈戠猾璇茬€?(鐎涙顑佹稉?setter + 缁?long getter)閵?// ---------------------------------------------------------------------------
+// Hold-to-launch: ARC menu hold-release trigger
+//
+// ScreenCore's open-mode decision reads splitGestureLaunchMode
+// (long: 0 = split, 1 = fullscreen, per the specifier's validValues).
+// This tweak does two things:
+//   1. setSelectedBundleIdentifier: records when the finger lands on a
+//      menu icon (dwell start)
+//   2. the open-mode getter is consulted at decision time — the return
+//      value is overridden by dwell >= threshold (one-shot)
+// All hooks are signature-confirmed-safe types (string setter + plain
+// long getter).
+// ---------------------------------------------------------------------------
 
 static NSTimeInterval axs_holdlaunch_now(void) {
     return [[NSDate date] timeIntervalSince1970];
 }
 
-// NSLog goes into the unified log which is hard to read on-device; mirror
-// every line into a plain file the user can open with Filza.
 static void axs_holdlaunch_log(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 static void axs_holdlaunch_log(NSString *format, ...) {
     va_list args;
@@ -49,14 +53,25 @@ static void axs_holdlaunch_log(NSString *format, ...) {
     }
 }
 
+// Ring engine C API (defined in AXSRingEngine.xm)
+void axs_ring_setSessionBundle(id session, NSString *bundle);
+void axs_ring_noteContainerForSession(id container, id session);
+void axs_ring_sessionClosed(id session);
+void axs_ring_sessionDocked(id session);
+void axs_ring_engine_wake(void);
+
 // Main-thread gesture state; the hooks all run on the main thread.
-static NSTimeInterval axs_arrivalTime = 0;        // when the current icon became selected
-static NSString *axs_arrivalBundle = nil;         // bundle id selected at axs_arrivalTime
+static NSTimeInterval axs_arrivalTime = 0;
+static NSString *axs_arrivalBundle = nil;
 static NSString *axs_lastSeenBundle = nil;
 
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origGestureMode = NULL;
 static IMP axs_origArcGestureMode = NULL;
+static IMP axs_origSessionForContainerView = NULL;
+static IMP axs_origSessionForBundle = NULL;
+static IMP axs_origCloseSession = NULL;
+static IMP axs_origDockSession = NULL;
 
 static void axs_holdlaunch_recordArrival(NSString *bundle) {
     if (![bundle isKindOfClass:[NSString class]] || bundle.length == 0) return;
@@ -65,13 +80,6 @@ static void axs_holdlaunch_recordArrival(NSString *bundle) {
     axs_arrivalBundle = bundle;
     axs_arrivalTime = axs_holdlaunch_now();
 }
-
-// Ring engine C API (defined in AXSRingEngine.xm)
-void axs_ring_setSessionBundle(id session, NSString *bundle);
-void axs_ring_noteContainerForSession(id container, id session);
-void axs_ring_sessionClosed(id session);
-void axs_ring_sessionDocked(id session);
-void axs_ring_engine_wake(void);
 
 static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     ((void(*)(id, SEL, id))axs_origSetSelectedBundle)(self, _cmd, bundle);
@@ -111,6 +119,29 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
     return axs_holdlaunch_gestureMode_imp(self, _cmd, axs_origArcGestureMode);
 }
 
+// Ring engine feed hooks (all signature-safe: object args, object/void returns)
+static id axs_holdlaunch_sessionForContainerView_imp(id self, SEL _cmd, id container) {
+    id session = ((id(*)(id, SEL, id))axs_origSessionForContainerView)(self, _cmd, container);
+    axs_ring_noteContainerForSession(container, session);
+    return session;
+}
+
+static id axs_holdlaunch_sessionForBundle_imp(id self, SEL _cmd, id bundleIdentifier) {
+    id session = ((id(*)(id, SEL, id))axs_origSessionForBundle)(self, _cmd, bundleIdentifier);
+    axs_ring_setSessionBundle(session, bundleIdentifier);
+    return session;
+}
+
+static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, id session, BOOL animated) {
+    axs_ring_sessionClosed(session);
+    ((void(*)(id, SEL, id, BOOL))axs_origCloseSession)(self, _cmd, session, animated);
+}
+
+static id axs_holdlaunch_dockSession_imp(id self, SEL _cmd, id session, unsigned long fromCorner) {
+    axs_ring_sessionDocked(session);
+    return ((id(*)(id, SEL, id, unsigned long))axs_origDockSession)(self, _cmd, session, fromCorner);
+}
+
 static BOOL axs_springboardHooksInstalled = NO;
 
 static NSArray<Class> *axs_holdlaunch_classesDeclaring(SEL selector) {
@@ -121,7 +152,6 @@ static NSArray<Class> *axs_holdlaunch_classesDeclaring(SEL selector) {
     unsigned int scClasses = 0;
     for (unsigned int i = 0; i < count; i++) {
         Class cls = classes[i];
-        // ScreenCore classes all start with SC / SCWS; limit the scan to them.
         const char *name = class_getName(cls);
         if (strncmp(name, "SC", 2) != 0) continue;
         scClasses++;
@@ -146,34 +176,6 @@ static NSUInteger axs_holdlaunch_hookSelector(SEL selector, IMP replacement, IMP
         hooked++;
     }
     return hooked;
-}
-
-// Ring engine feed hooks (all signature-safe: object args, object/void returns)
-static IMP axs_origSessionForContainerView = NULL;
-static IMP axs_origSessionForBundle = NULL;
-static IMP axs_origCloseSession = NULL;
-static IMP axs_origDockSession = NULL;
-
-static id axs_holdlaunch_sessionForContainerView_imp(id self, SEL _cmd, id container) {
-    id session = ((id(*)(id, SEL, id))axs_origSessionForContainerView)(self, _cmd, container);
-    axs_ring_noteContainerForSession(container, session);
-    return session;
-}
-
-static id axs_holdlaunch_sessionForBundle_imp(id self, SEL _cmd, id bundleIdentifier) {
-    id session = ((id(*)(id, SEL, id))axs_origSessionForBundle)(self, _cmd, bundleIdentifier);
-    axs_ring_setSessionBundle(session, bundleIdentifier);
-    return session;
-}
-
-static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, id session, BOOL animated) {
-    axs_ring_sessionClosed(session);
-    ((void(*)(id, SEL, id, BOOL))axs_origCloseSession)(self, _cmd, session, animated);
-}
-
-static id axs_holdlaunch_dockSession_imp(id self, SEL _cmd, id session, unsigned long fromCorner) {
-    axs_ring_sessionDocked(session);
-    return ((id(*)(id, SEL, id, unsigned long))axs_origDockSession)(self, _cmd, session, fromCorner);
 }
 
 static void axs_holdlaunch_installSpringBoardHooks(void) {
@@ -207,23 +209,28 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Settings side: the specifier rows live in the patched SplitSettings.plist;
-// these hooks quantize the threshold value (input dialog prefill + writes) so
-// it never shows more than two decimals.
+// Settings side
 // ---------------------------------------------------------------------------
 
 static NSString * const AxsHoldLaunchKeyEnabled = @"HoldPressEnabled";
 static NSString * const AxsHoldLaunchKeyThreshold = @"HoldPressThreshold";
 static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
+static NSString * const AxsHoldLaunchKeyRingColor = @"splitWindowRingColor";
+static NSString * const AxsHoldLaunchKeyGlowColor = @"splitWindowGlowColor";
 
 static IMP axs_origSpecifiers = NULL;
 static IMP axs_origReadPrefValue = NULL;
 static IMP axs_origSetPrefValue = NULL;
 static IMP axs_origDidSelect = NULL;
+static IMP axs_origCellForRow = NULL;
 static BOOL axs_settingsInstalled = NO;
 
-static NSString * const AxsHoldLaunchKeyRingColor = @"splitWindowRingColor";
-static NSString * const AxsHoldLaunchKeyGlowColor = @"splitWindowGlowColor";
+static double axs_holdlaunch_quantizeThreshold(double value) {
+    double v = round(value / 0.05) * 0.05;
+    if (v < 0.2) v = 0.2;
+    if (v > 5.0) v = 5.0;
+    return v;
+}
 
 static UIColor *axs_holdlaunch_hexToColor(NSString *hex, UIColor *fallback) {
     if (![hex isKindOfClass:[NSString class]] || hex.length == 0) return fallback;
@@ -245,55 +252,11 @@ static NSString *axs_holdlaunch_colorToHex(UIColor *color) {
             (int)round(r * 255), (int)round(g * 255), (int)round(b * 255)];
 }
 
-static void axs_holdlaunch_presentColorPicker(id self, NSString *title, NSString *key) {
-    if (!objc_getClass("UIColorPickerViewController")) {
-        axs_holdlaunch_log(@"UIColorPickerViewController unavailable");
-        return;
-    }
-    UIViewController *picker = [[objc_getClass("UIColorPickerViewController") alloc] init];
-    if ([picker respondsToSelector:@selector(setSupportsAlpha:)]) {
-        ((void(*)(id, SEL, BOOL))objc_msgSend)(picker, @selector(setSupportsAlpha:), NO);
-    }
-    if ([picker respondsToSelector:@selector(setInitialColor:)]) {
-        UIColor *initial = axs_holdlaunch_hexToColor(
-            [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_valueForKey:key defaultValue:nil],
-            [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
-        ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setInitialColor:), initial);
-    }
-    if ([picker respondsToSelector:@selector(setTitle:)]) {
-        ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setTitle:), title);
-    }
-    objc_setAssociatedObject(picker, @selector(axsGlowColorKey), key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    // Delegate: colorPickerControllerDidFinish: was added to the controller
-    // class in installSettingsHooks 閳?without this the picked color never saves.
-    if ([picker respondsToSelector:@selector(setDelegate:)]) {
-        ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setDelegate:), self);
-    }
-    [self presentViewController:picker animated:YES completion:nil];
-}
-
-static void axs_holdlaunch_colorPickerDidFinish_imp(id self, SEL _cmd, id picker) {
-    UIColor *color = nil;
-    if ([picker respondsToSelector:@selector(selectedColor)]) {
-        color = ((id(*)(id, SEL))objc_msgSend)(picker, @selector(selectedColor));
-    }
-    NSString *key = objc_getAssociatedObject(picker, @selector(axsGlowColorKey));
-    if (color && key.length > 0) {
-        NSString *hex = axs_holdlaunch_colorToHex(color);
-        NSError *error = nil;
-        axs_holdlaunch_writePreference(key, hex, &error);
-        if ([self respondsToSelector:@selector(reloadSpecifiers)]) {
-            ((void(*)(id, SEL))objc_msgSend)(self, @selector(reloadSpecifiers));
-        }
-    }
-    [picker dismissViewControllerAnimated:YES completion:nil];
-}
-
-static double axs_holdlaunch_quantizeThreshold(double value) {
-    double v = round(value / 0.05) * 0.05;
-    if (v < 0.2) v = 0.2;
-    if (v > 5.0) v = 5.0;
-    return v;
+static PSSpecifier *axs_holdlaunch_specifier(NSString *name, id target, SEL set, SEL get) {
+    Class PSSpecifierClass = objc_getClass("PSSpecifier");
+    return ((PSSpecifier *(*)(id, SEL, NSString *, id, SEL, SEL, id, NSInteger, id))objc_msgSend)(
+        PSSpecifierClass, @selector(preferenceSpecifierNamed:target:set:get:detail:cell:edit:),
+        name, target, set, get, nil, 1, nil);
 }
 
 static id axs_readPreferenceValue_imp(id self, SEL _cmd, id specifier) {
@@ -313,6 +276,44 @@ static void axs_setPreferenceValue_imp(id self, SEL _cmd, id value, id specifier
     ((void(*)(id, SEL, id, id))axs_origSetPrefValue)(self, _cmd, value, specifier);
 }
 
+static void axs_holdlaunch_presentColorPicker(id self, NSString *title, NSString *key) {
+    if (!objc_getClass("UIColorPickerViewController")) return;
+    UIViewController *picker = [[objc_getClass("UIColorPickerViewController") alloc] init];
+    if ([picker respondsToSelector:@selector(setSupportsAlpha:)]) {
+        ((void(*)(id, SEL, BOOL))objc_msgSend)(picker, @selector(setSupportsAlpha:), NO);
+    }
+    if ([picker respondsToSelector:@selector(setInitialColor:)]) {
+        UIColor *initial = axs_holdlaunch_hexToColor(
+            [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_valueForKey:key defaultValue:nil],
+            [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
+        ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setInitialColor:), initial);
+    }
+    if ([picker respondsToSelector:@selector(setTitle:)]) {
+        ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setTitle:), title);
+    }
+    objc_setAssociatedObject(picker, @selector(axsGlowColorKey), key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([picker respondsToSelector:@selector(setDelegate:)]) {
+        ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setDelegate:), self);
+    }
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+static void axs_holdlaunch_colorPickerDidFinish_imp(id self, SEL _cmd, id picker) {
+    UIColor *color = nil;
+    if ([picker respondsToSelector:@selector(selectedColor)]) {
+        color = ((id(*)(id, SEL))objc_msgSend)(picker, @selector(selectedColor));
+    }
+    NSString *key = objc_getAssociatedObject(picker, @selector(axsGlowColorKey));
+    if (color && key.length > 0) {
+        NSString *hex = axs_holdlaunch_colorToHex(color);
+        axs_holdlaunch_writePreference(key, hex, nil);
+        if ([self respondsToSelector:@selector(reloadSpecifiers)]) {
+            ((void(*)(id, SEL))objc_msgSend)(self, @selector(reloadSpecifiers));
+        }
+    }
+    [picker dismissViewControllerAnimated:YES completion:nil];
+}
+
 static void axs_didSelectRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
     @try {
         NSString *key = nil;
@@ -321,32 +322,30 @@ static void axs_didSelectRow_imp(id self, SEL _cmd, id tableView, id indexPath) 
             key = [spec propertyForKey:@"key"];
         }
         if ([key isEqualToString:AxsHoldLaunchKeyRingColor]) {
-            axs_holdlaunch_presentColorPicker(self, @"閸忓婀€妫版粏澹?, AxsHoldLaunchKeyRingColor);
+            axs_holdlaunch_presentColorPicker(self, @"Ring Color", AxsHoldLaunchKeyRingColor);
             return;
         }
         if ([key isEqualToString:AxsHoldLaunchKeyGlowColor]) {
-            axs_holdlaunch_presentColorPicker(self, @"閸忓妾挎０婊嗗", AxsHoldLaunchKeyGlowColor);
+            axs_holdlaunch_presentColorPicker(self, @"Glow Color", AxsHoldLaunchKeyGlowColor);
             return;
         }
     } @catch (NSException *exception) {
-        // fall through to the original handler
+        // fall through
     }
     ((void(*)(id, SEL, id, id))axs_origDidSelect)(self, _cmd, tableView, indexPath);
 }
 
-// 妫版粏澹婄悰灞藉礁娓氀呮畱閸﹀棗婀€閹稿鎸? 閻愯瀵滃鐟板絿閼规彃娅?static void axs_holdlaunch_colorButtonTapped_imp(id self, SEL _cmd, id sender) {
+static void axs_colorButtonTapped_imp(id self, SEL _cmd, id sender) {
     int tag = 0;
     if ([sender respondsToSelector:@selector(tag)]) {
         tag = (int)((long(*)(id, SEL))objc_msgSend)(sender, @selector(tag));
     }
     if (tag == 1) {
-        axs_holdlaunch_presentColorPicker(self, @"閸忓妾挎０婊嗗", AxsHoldLaunchKeyGlowColor);
+        axs_holdlaunch_presentColorPicker(self, @"Glow Color", AxsHoldLaunchKeyGlowColor);
     } else {
-        axs_holdlaunch_presentColorPicker(self, @"閸忓婀€妫版粏澹?, AxsHoldLaunchKeyRingColor);
+        axs_holdlaunch_presentColorPicker(self, @"Ring Color", AxsHoldLaunchKeyRingColor);
     }
 }
-
-static IMP axs_origCellForRow = NULL;
 
 static id axs_cellForRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
     UITableViewCell *cell = ((UITableViewCell *(*)(id, SEL, id, id))axs_origCellForRow)(self, _cmd, tableView, indexPath);
@@ -362,7 +361,6 @@ static id axs_cellForRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
         if ([key isEqualToString:AxsHoldLaunchKeyGlowColor]) { colorKey = key; tag = 1; }
         if (colorKey == nil) return cell;
 
-        // 閸欏厖鏅惰ぐ鎾冲妫版粏澹婇崷鍡楁箑 (UIButton, 閻愮懓鍤鐟板絿閼规彃娅?
         NSString *hex = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_valueForKey:colorKey defaultValue:nil];
         UIColor *color = axs_holdlaunch_hexToColor(hex, [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
         UIButton *dot = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -376,29 +374,49 @@ static id axs_cellForRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
         [dot addTarget:self action:@selector(axs_holdlaunch_colorButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
         cell.accessoryView = dot;
     } @catch (NSException *exception) {
-        // cell 鐟佸懘銈版径杈Е娑撳秴濂栭崫宥呭斧閸旂喕鍏?    }
+        // cell decoration failure does not affect the original cell
+    }
     return cell;
 }
 
-// PSSpecifier is resolved at runtime; direct class references would break
-// linking for the SpringBoard slice.
-static PSSpecifier *axs_holdlaunch_specifier(NSString *name, id target, SEL set, SEL get) {
-    Class PSSpecifierClass = objc_getClass("PSSpecifier");
-    return ((PSSpecifier *(*)(id, SEL, NSString *, id, SEL, SEL, id, NSInteger, id))objc_msgSend)(
-        PSSpecifierClass, @selector(preferenceSpecifierNamed:target:set:get:detail:cell:edit:),
-        name, target, set, get, nil, 1, nil);
+static NSArray *axs_specifiers_imp(id self, SEL _cmd) {
+    NSArray *original = ((NSArray *(*)(id, SEL))axs_origSpecifiers)(self, _cmd);
+    NSMutableArray *specifiers = [original mutableCopy] ?: [NSMutableArray array];
+    for (PSSpecifier *spec in specifiers) {
+        if ([[spec propertyForKey:@"key"] isEqualToString:AxsHoldLaunchKeyEnabled]) {
+            return original; // already provided by the patched SplitSettings.plist
+        }
+    }
+
+    NSUInteger anchor = NSNotFound;
+    for (NSUInteger i = 0; i < specifiers.count; i++) {
+        NSString *key = [(PSSpecifier *)specifiers[i] propertyForKey:@"key"];
+        if ([key isEqualToString:@"splitSideGestureLaunchMode"]
+            || [key isEqualToString:@"splitArcGestureLaunchMode"]) {
+            anchor = i;
+        }
+    }
+
+    NSArray *added = axs_holdlaunch_injectedSpecifiers_imp(self, _cmd);
+    if (anchor == NSNotFound) {
+        [specifiers addObjectsFromArray:added];
+    } else {
+        [specifiers insertObjects:added
+                        atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(anchor + 1, added.count)]];
+    }
+    return specifiers;
 }
 
 static NSArray *axs_holdlaunch_injectedSpecifiers_imp(id self, SEL _cmd) {
     SEL setSel = @selector(axs_holdlaunch_writeValue:forSpecifier:);
     SEL getSel = @selector(axs_holdlaunch_readValueForSpecifier:);
 
-    PSSpecifier *enabled = axs_holdlaunch_specifier(@"闂€鎸庡瘻閺夌偓澧滅憴锕€褰?, self, setSel, getSel);
+    PSSpecifier *enabled = axs_holdlaunch_specifier(@"Hold-to-Launch", self, setSel, getSel);
     [enabled setProperty:AxsHoldLaunchKeyEnabled forKey:@"key"];
     [enabled setProperty:@"PSSwitchCell" forKey:@"cellClass"];
     [enabled setIdentifier:@"axsHoldLaunchEnabledSpecifier"];
 
-    PSSpecifier *threshold = axs_holdlaunch_specifier(@"鐟欙箑褰傞弮鍫曟？閿涘牏顫楅敍?, self, setSel, getSel);
+    PSSpecifier *threshold = axs_holdlaunch_specifier(@"Threshold (s)", self, setSel, getSel);
     [threshold setProperty:AxsHoldLaunchKeyThreshold forKey:@"key"];
     [threshold setProperty:@"PSSliderCell" forKey:@"cellClass"];
     [threshold setProperty:@(0.2) forKey:@"min"];
@@ -406,7 +424,7 @@ static NSArray *axs_holdlaunch_injectedSpecifiers_imp(id self, SEL _cmd) {
     [threshold setProperty:@YES forKey:@"showValue"];
     [threshold setIdentifier:@"axsHoldLaunchThresholdSpecifier"];
 
-    PSSpecifier *reverse = axs_holdlaunch_specifier(@"閸欏秷娴嗛梹鎸庡瘻閸斻劋缍?, self, setSel, getSel);
+    PSSpecifier *reverse = axs_holdlaunch_specifier(@"Reverse Hold Action", self, setSel, getSel);
     [reverse setProperty:AxsHoldLaunchKeyReverse forKey:@"key"];
     [reverse setProperty:@"PSSwitchCell" forKey:@"cellClass"];
     [reverse setIdentifier:@"axsHoldLaunchReverseSpecifier"];
@@ -441,34 +459,6 @@ static void axs_holdlaunch_writeValue_imp(id self, SEL _cmd, id value, PSSpecifi
     }
 }
 
-static NSArray *axs_specifiers_imp(id self, SEL _cmd) {
-    NSArray *original = ((NSArray *(*)(id, SEL))axs_origSpecifiers)(self, _cmd);
-    NSMutableArray *specifiers = [original mutableCopy] ?: [NSMutableArray array];
-    for (PSSpecifier *spec in specifiers) {
-        if ([[spec propertyForKey:@"key"] isEqualToString:AxsHoldLaunchKeyEnabled]) {
-            return original; // already provided by the patched SplitSettings.plist
-        }
-    }
-
-    NSUInteger anchor = NSNotFound;
-    for (NSUInteger i = 0; i < specifiers.count; i++) {
-        NSString *key = [(PSSpecifier *)specifiers[i] propertyForKey:@"key"];
-        if ([key isEqualToString:@"splitSideGestureLaunchMode"]
-            || [key isEqualToString:@"splitArcGestureLaunchMode"]) {
-            anchor = i; // keep the last match: the end of the "閸氼垰濮? group
-        }
-    }
-
-    NSArray *added = axs_holdlaunch_injectedSpecifiers_imp(self, _cmd);
-    if (anchor == NSNotFound) {
-        [specifiers addObjectsFromArray:added];
-    } else {
-        [specifiers insertObjects:added
-                        atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(anchor + 1, added.count)]];
-    }
-    return specifiers;
-}
-
 static void axs_holdlaunch_installSettingsHooks(void) {
     if (axs_settingsInstalled) return;
     Class cls = objc_getClass("SCSplitSettingsController");
@@ -480,8 +470,6 @@ static void axs_holdlaunch_installSettingsHooks(void) {
     const char *types = method_getTypeEncoding(method);
     IMP original = method_getImplementation(method);
     if (class_addMethod(cls, sel, (IMP)axs_specifiers_imp, types)) {
-        // The subclass inherited -specifiers; adding it locally keeps every
-        // other list controller untouched.
         axs_origSpecifiers = original;
     } else {
         MSHookMessageEx(cls, sel, (IMP)axs_specifiers_imp, &axs_origSpecifiers);
@@ -490,8 +478,6 @@ static void axs_holdlaunch_installSettingsHooks(void) {
     class_addMethod(cls, @selector(axs_holdlaunch_readValueForSpecifier:), (IMP)axs_holdlaunch_readValue_imp, "@@:@");
     class_addMethod(cls, @selector(axs_holdlaunch_writeValue:forSpecifier:), (IMP)axs_holdlaunch_writeValue_imp, "v@:@");
 
-    // Quantize the threshold slider (read = input dialog prefill, write =
-    // slider drags and typed values) so it never shows more than 2 decimals.
     SEL selRead = @selector(readPreferenceValue:);
     Method readMethod = class_getInstanceMethod(cls, selRead);
     if (readMethod) {
@@ -513,7 +499,7 @@ static void axs_holdlaunch_installSettingsHooks(void) {
         }
     }
 
-    // Tap on a glow color row -> present the system color picker.
+    // Color picker: tap on a ring/glow color row -> UIColorPickerViewController
     SEL selDidSelect = @selector(tableView:didSelectRowAtIndexPath:);
     Method didSelectMethod = class_getInstanceMethod(cls, selDidSelect);
     if (didSelectMethod) {
@@ -523,11 +509,10 @@ static void axs_holdlaunch_installSettingsHooks(void) {
         } else {
             MSHookMessageEx(cls, selDidSelect, (IMP)axs_didSelectRow_imp, &axs_origDidSelect);
         }
-        // Color picker completion (delegate method added to the controller).
         class_addMethod(cls, @selector(colorPickerControllerDidFinish:), (IMP)axs_holdlaunch_colorPickerDidFinish_imp, "v@:@");
     }
 
-    // Color circle button on the row + its tap handler.
+    // Color circle button on the row + its tap handler
     SEL selCellForRow = @selector(tableView:cellForRowAtIndexPath:);
     Method cellForRowMethod = class_getInstanceMethod(cls, selCellForRow);
     if (cellForRowMethod) {
@@ -537,7 +522,7 @@ static void axs_holdlaunch_installSettingsHooks(void) {
         } else {
             MSHookMessageEx(cls, selCellForRow, (IMP)axs_cellForRow_imp, &axs_origCellForRow);
         }
-        class_addMethod(cls, @selector(axs_holdlaunch_colorButtonTapped:), (IMP)axs_holdlaunch_colorButtonTapped_imp, "v@:@");
+        class_addMethod(cls, @selector(axs_holdlaunch_colorButtonTapped:), (IMP)axs_colorButtonTapped_imp, "v@:@");
     }
     axs_settingsInstalled = YES;
     axs_holdlaunch_log(@"settings hooks installed");
@@ -548,8 +533,6 @@ static void axs_holdlaunch_installSettingsHooks(void) {
 %hook PSListController
 
 - (void)loadView {
-    // ScreenCorePrefs.bundle is already loaded by the time a ScreenCore list
-    // controller loads its view.
     axs_holdlaunch_log(@"PSListController loadView: %@",
                        NSStringFromClass([self class]));
     axs_holdlaunch_installSettingsHooks();
@@ -558,19 +541,14 @@ static void axs_holdlaunch_installSettingsHooks(void) {
 
 %end
 
-%end // AxsHoldLaunchSettingsTrigger
+%end
 
 // ---------------------------------------------------------------------------
-
-void axs_ring_engine_wake(void);
 
 %group AxsHoldLaunchSpringBoardTrigger
 
 %hook SpringBoard
 
-// ScreenCore's dylib may load AFTER this tweak (dlopen order is not
-// guaranteed), so its classes are only guaranteed to exist once the
-// system has finished launching -- install the real hooks there.
 - (void)applicationDidFinishLaunching:(id)application {
     axs_holdlaunch_log(@"springboard didFinishLaunching");
     axs_holdlaunch_installSpringBoardHooks();
@@ -580,13 +558,12 @@ void axs_ring_engine_wake(void);
 
 %end
 
-%end // AxsHoldLaunchSpringBoardTrigger
+%end
 
 // ---------------------------------------------------------------------------
 
 %ctor {
     @autoreleasepool {
-        // Readers load a snapshot; they never write default preferences.
         [AxsHoldLaunchConfig axs_holdlaunch_shared];
 
         if (objc_getClass("SpringBoard") != nil) {
