@@ -64,6 +64,10 @@ static NSString *axs_arrivalBundle = nil;         // bundle id selected at axs_a
 static NSString *axs_lastSeenBundle = nil;
 static NSString *axs_lastARCBundle = nil;         // last bundle opened through a user gesture
 static NSString *axs_activeFloatingBundle = nil;  // bundle whose floating window is currently up
+static int axs_sessionHookDepth = 0;              // re-entrancy guard: while our close/dock
+                                                  // helpers run, ScreenCore's own internals may
+                                                  // query sessions again - those calls must
+                                                  // pass straight through the original IMP.
 
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origGestureMode = NULL;
@@ -201,11 +205,6 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
 // DIFFERENT app A (payment completion callback, conversion finished), close
 // the floating session of B. Uses only signature-safe hooks.
 // ---------------------------------------------------------------------------
-
-static int axs_sessionHookDepth = 0;  // re-entrancy guard: while our close/dock
-                                      // helpers run, ScreenCore's own internals may
-                                      // query sessions again - those calls must
-                                      // pass straight through the original IMP.
 
 static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) {
     if (axs_sessionHookDepth > 0) {
