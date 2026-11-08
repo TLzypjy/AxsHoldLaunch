@@ -177,10 +177,6 @@ static id axs_holdlaunch_route_imp(id self, SEL _cmd, id bundleIdentifier,
 
 static BOOL axs_springboardHooksInstalled = NO;
 
-static NSUInteger axs_holdlaunch_hookSelector(SEL selector, IMP replacement, IMP *original) {
-    return axs_holdlaunch_hookSelectorInScope(selector, replacement, original, NO);
-}
-
 // scanAllClasses: some ScreenCore selectors are dispatched dynamically and
 // implemented on classes outside the SC* prefix, so the prefix filter would
 // never find them (sc_routeApplicationRequest... was one).
@@ -209,6 +205,10 @@ static NSUInteger axs_holdlaunch_hookSelectorInScope(SEL selector, IMP replaceme
     }
     free(classes);
     return hooked;
+}
+
+static NSUInteger axs_holdlaunch_hookSelector(SEL selector, IMP replacement, IMP *original) {
+    return axs_holdlaunch_hookSelectorInScope(selector, replacement, original, NO);
 }
 
 static void axs_holdlaunch_installSpringBoardHooks(void) {
