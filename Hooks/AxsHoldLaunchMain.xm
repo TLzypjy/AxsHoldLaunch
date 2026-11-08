@@ -64,6 +64,7 @@ static NSString *axs_arrivalBundle = nil;         // bundle id selected at axs_a
 static NSString *axs_lastSeenBundle = nil;
 static NSString *axs_lastARCBundle = nil;         // last bundle opened through a user gesture
 static NSString *axs_activeFloatingBundle = nil;  // bundle whose floating window is currently up
+static NSString *axs_returnTargetBundle = nil;    // jump target: returning here closes the jumper
 static int axs_sessionHookDepth = 0;              // re-entrancy guard: while our close/dock
                                                   // helpers run, ScreenCore's own internals may
                                                   // query sessions again - those calls must
