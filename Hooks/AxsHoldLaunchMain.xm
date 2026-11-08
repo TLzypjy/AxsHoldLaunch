@@ -158,8 +158,10 @@ static id axs_holdlaunch_route_imp(id self, SEL _cmd, id bundleIdentifier,
     // passed through bit-exact as integers.
     axs_holdlaunch_log(@"route bundle=%@", bundleIdentifier);
     BOOL isString = [bundleIdentifier isKindOfClass:[NSString class]];
+    // Gate on ScreenCore's OWN callback-close switch so this repairs the
+    // original feature instead of adding a parallel one.
     if (isString
-        && [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isAutoCloseEnabled]
+        && [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isTheirCallbackCloseEnabled]
         && axs_lastJumpBundle != nil
         && ![bundleIdentifier isEqualToString:axs_lastJumpBundle]
         && axs_holdlaunch_now() - axs_lastJumpTime <= 120.0) {
@@ -175,18 +177,24 @@ static id axs_holdlaunch_route_imp(id self, SEL _cmd, id bundleIdentifier,
 
 static BOOL axs_springboardHooksInstalled = NO;
 
-static NSArray<Class> *axs_holdlaunch_classesDeclaring(SEL selector) {
+static NSUInteger axs_holdlaunch_hookSelector(SEL selector, IMP replacement, IMP *original) {
+    return axs_holdlaunch_hookSelectorInScope(selector, replacement, original, NO);
+}
+
+// scanAllClasses: some ScreenCore selectors are dispatched dynamically and
+// implemented on classes outside the SC* prefix, so the prefix filter would
+// never find them (sc_routeApplicationRequest... was one).
+static NSUInteger axs_holdlaunch_hookSelectorInScope(SEL selector, IMP replacement, IMP *original, BOOL scanAllClasses) {
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
-    if (!classes) return @[];
-    NSMutableArray<Class> *result = [NSMutableArray array];
-    unsigned int scClasses = 0;
+    if (!classes) return 0;
+    NSUInteger hooked = 0;
     for (unsigned int i = 0; i < count; i++) {
         Class cls = classes[i];
-        // ScreenCore classes all start with SC / SCWS; limit the scan to them.
-        const char *name = class_getName(cls);
-        if (strncmp(name, "SC", 2) != 0) continue;
-        scClasses++;
+        if (!scanAllClasses) {
+            const char *name = class_getName(cls);
+            if (strncmp(name, "SC", 2) != 0) continue;
+        }
         unsigned int methodCount = 0;
         Method *methods = class_copyMethodList(cls, &methodCount);
         BOOL declared = NO;
@@ -194,19 +202,12 @@ static NSArray<Class> *axs_holdlaunch_classesDeclaring(SEL selector) {
             if (method_getName(methods[m]) == selector) { declared = YES; break; }
         }
         free(methods);
-        if (declared) [result addObject:cls];
+        if (declared) {
+            MSHookMessageEx(cls, selector, replacement, original);
+            hooked++;
+        }
     }
     free(classes);
-    axs_holdlaunch_log(@"scan '%s': %u SC classes of %u total", sel_getName(selector), scClasses, count);
-    return result;
-}
-
-static NSUInteger axs_holdlaunch_hookSelector(SEL selector, IMP replacement, IMP *original) {
-    NSUInteger hooked = 0;
-    for (Class cls in axs_holdlaunch_classesDeclaring(selector)) {
-        MSHookMessageEx(cls, selector, replacement, original);
-        hooked++;
-    }
     return hooked;
 }
 
@@ -221,9 +222,11 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger modeCount = axs_holdlaunch_hookSelector(selMode, (IMP)axs_holdlaunch_gestureMode_imp_a, &axs_origGestureMode);
     NSUInteger arcModeCount = axs_holdlaunch_hookSelector(selArcMode, (IMP)axs_holdlaunch_gestureMode_imp_b, &axs_origArcGestureMode);
 
-    // Jump/callback auto-close hooks (all signature-safe).
+    // Jump/callback auto-close hooks. The route selector is implemented on a
+    // class outside the SC* prefix (dispatched dynamically), so it needs the
+    // full-class scan; the rest are SC-declared.
     SEL selRoute = @selector(sc_routeApplicationRequestForBundleIdentifier:options:origin:forward:);
-    NSUInteger routeCount = axs_holdlaunch_hookSelector(selRoute, (IMP)axs_holdlaunch_route_imp, &axs_origRoute);
+    NSUInteger routeCount = axs_holdlaunch_hookSelectorInScope(selRoute, (IMP)axs_holdlaunch_route_imp, &axs_origRoute, YES);
     SEL selSessionFor = @selector(sc_sessionForBundleIdentifier:);
     NSUInteger sessionForCount = axs_holdlaunch_hookSelector(selSessionFor, (IMP)axs_holdlaunch_sessionFor_imp, &axs_origSessionFor);
 

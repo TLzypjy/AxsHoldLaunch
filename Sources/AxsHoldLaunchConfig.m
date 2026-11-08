@@ -66,9 +66,14 @@ static void axs_holdlaunch_preferencesDidChange(CFNotificationCenterRef center, 
     return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
 }
 
-- (BOOL)axs_holdlaunch_isAutoCloseEnabled {
-    id value = [self axs_holdlaunch_valueForKey:@"AutoCloseJumpWindow" defaultValue:@YES];
-    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : YES;
+- (BOOL)axs_holdlaunch_isTheirCallbackCloseEnabled {
+    // ScreenCore's own switch: com.susudear.screencoreprefs /
+    // splitCallbackAutoCloseFloatingEnabled. Read live through cfprefsd so
+    // the repair follows the original toggle exactly.
+    Boolean exists = NO;
+    Boolean enabled = CFPreferencesGetAppBooleanValue(CFSTR("splitCallbackAutoCloseFloatingEnabled"),
+                                                      CFSTR("com.susudear.screencoreprefs"), &exists);
+    return exists ? (BOOL)enabled : NO;
 }
 
 - (void)dealloc {
