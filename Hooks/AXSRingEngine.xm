@@ -180,10 +180,10 @@ void axs_ring_noteContainerForSession(void *container, void *session) {
         m[@"bundle"] = bundle;
         m[@"excluded"] = nil; // re-evaluate exclusion for the new app
     }
-    UIWindow *host = containerView.window ?: [axs_hosts objectForKey:key];
+    UIWindow *host = [(UIView *)containerView window] ?: [axs_hosts objectForKey:key];
     if (host != nil) [axs_hosts setObject:host forKey:key];
     axs_ring_engine_log(@"ring container noted: session=%p host=%p bounds=%@",
-                        session, host, NSStringFromCGRect(containerView.bounds));
+                        session, host, NSStringFromCGRect([(UIView *)containerView bounds]));
     axs_ring_engine_wake();
 }
 
@@ -215,7 +215,7 @@ void axs_ring_sessionHostingBegan(void *session) {
     id container = nil;
     @try { container = [sessionObject valueForKey:@"containerView"]; } @catch (NSException *e) { }
     if ([container isKindOfClass:[UIView class]]) {
-        axs_ring_noteContainerForSession(container, session);
+        axs_ring_noteContainerForSession((__bridge void *)container, session);
     }
     axs_ring_engine_wake();
 }
