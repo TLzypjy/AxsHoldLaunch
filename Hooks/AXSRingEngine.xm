@@ -4,23 +4,20 @@
 #import "AxsHoldLaunchConfig.h"
 
 // ---------------------------------------------------------------------------
-// Ring/glow engine (event-driven).
+// Ring/glow engine (event-driven, LingDong-style rendering).
 //
 // Registry: floating containers and docked mini items register themselves via
-// -didMoveToWindow hooks (installed by AxsHoldLaunchMain.xm); sessions bind to
-// containers through sc_sessionForContainerView:, sc_sessionDidBeginHosting:
-// and the bundle setter. The tick walks ONLY the registry - no view-tree
-// scanning, no per-frame plist reads:
-//   1. drop entries whose view/window died (weak refs)
-//   2. rebuild layers when the style signature changed
-//   3. update CAShapeLayer.path inside a disabled-actions CATransaction when
-//      the on-screen frame changed
-//   4. invalidate the display link when nothing is drawn - zero idle spinning
+// -didMoveToWindow hooks; sessions pair up through sc_sessionForContainerView:,
+// sc_sessionDidBeginHosting: and the bundle setter; sc_closeSession: tears
+// entries down. The tick walks ONLY the registry - no view-tree scanning, no
+// per-frame plist reads.
 //
-// Rendering per entry: frame stroke (width/alpha/color/random) + optional
-// glow stroke (range + offsets) + optional inner stroke, all on one shared
-// overlay UIWindow (userInteractionEnabled = NO) above the floating host
-// windows, below the status bar when possible.
+// Rendering (this is the part that makes the ring actually visible): the ring
+// layers are injected as sublayers of the floating window's OWN layer tree,
+// exactly like LingDong injects into the Dynamic Island's window. No overlay
+// UIWindow: same-window layers are always composited above the content they
+// cover, cannot be hidden by a level mismatch, and CALayers never intercept
+// touches.
 // ---------------------------------------------------------------------------
 
 @interface AXSRingEngineTarget : NSObject
@@ -28,7 +25,6 @@
 - (void)axsRingTick;
 @end
 
-static UIWindow *axs_ringWindow = nil;
 static CADisplayLink *axs_ringLink = nil;
 
 // registry (keys are pointer strings, object values are weak)
@@ -127,6 +123,8 @@ static void axs_ring_detachLayers(NSString *key) {
 
 // --- C API fed by AxsHoldLaunchMain.xm hooks ---
 // .xm compiles as ObjC++; keep C linkage so Config.m (plain ObjC) can call in.
+// Every entry point validates its arguments: hook signatures are discovered at
+// runtime and a primitive sneaking through as `id` must not crash here.
 
 extern "C" {
 
@@ -134,11 +132,12 @@ void axs_ring_engine_wake(void);
 
 // didMoveToWindow: container (docked=NO) or docked mini item (docked=YES)
 void axs_ring_noteContainer(id view, id hostWindow, BOOL docked) {
-    if (view == nil || ![view isKindOfClass:[UIView class]]) return;
+    if (![view isKindOfClass:[UIView class]]) return;
+    if (hostWindow != nil && ![hostWindow isKindOfClass:[UIWindow class]]) return;
     axs_ring_ensureMaps();
     NSString *key = [NSString stringWithFormat:@"%c%@", docked ? 'd' : 'c', axs_ring_keyFor(view)];
     [axs_views setObject:view forKey:key];
-    UIWindow *window = [hostWindow isKindOfClass:[UIWindow class]] ? hostWindow : [(UIView *)view window];
+    UIWindow *window = hostWindow ?: [(UIView *)view window];
     if (window != nil) [axs_hosts setObject:window forKey:key];
 
     NSMutableDictionary *m = axs_meta[key];
@@ -158,7 +157,7 @@ void axs_ring_noteContainer(id view, id hostWindow, BOOL docked) {
 
 // sc_sessionForContainerView: - the authoritative container<->session pairing
 void axs_ring_noteContainerForSession(id container, id session) {
-    if (container == nil || session == nil) return;
+    if (![container isKindOfClass:[UIView class]] || session == nil) return;
     axs_ring_ensureMaps();
     NSString *key = [NSString stringWithFormat:@"c%@", axs_ring_keyFor(container)];
     NSMutableDictionary *m = axs_meta[key];
@@ -203,7 +202,7 @@ void axs_ring_setSessionBundle(id session, NSString *bundle) {
 
 // sc_sessionDidBeginHosting: - try to bind the session's own container view
 void axs_ring_sessionHostingBegan(id session) {
-    if (session == nil) return;
+    if (![session isKindOfClass:[NSObject class]]) return;
     id container = nil;
     @try { container = [session valueForKey:@"containerView"]; } @catch (NSException *e) { }
     if ([container isKindOfClass:[UIView class]]) {
@@ -214,8 +213,7 @@ void axs_ring_sessionHostingBegan(id session) {
 
 // sc_closeSession: - drop the session's entries
 void axs_ring_sessionClosed(id session) {
-    if (session == nil) return;
-    if (axs_meta == nil) return;
+    if (session == nil || axs_meta == nil) return;
     NSString *sessionKey = axs_ring_keyFor(session);
     NSUInteger removed = 0;
     for (NSString *key in [axs_meta allKeys]) {
@@ -295,24 +293,6 @@ void axs_ring_engine_wake(void) {
 
 // --- rendering internals ---
 
-static UIWindow *axs_ring_ensureOverlayWindow(CGFloat hostLevel) {
-    if (axs_ringWindow != nil) {
-        axs_ringWindow.windowLevel = hostLevel + 1;
-        return axs_ringWindow;
-    }
-    CGFloat level = hostLevel + 1;
-    if (hostLevel < 1000.0 && level >= 1000.0) level = 999.0; // stay below the status bar
-    axs_ringWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    axs_ringWindow.windowLevel = level;
-    axs_ringWindow.userInteractionEnabled = NO; // never intercept touches
-    axs_ringWindow.opaque = NO;
-    axs_ringWindow.backgroundColor = [UIColor clearColor];
-    axs_ringWindow.rootViewController = [UIViewController new];
-    axs_ringWindow.hidden = NO;
-    axs_ring_engine_log(@"ring overlay window created, level=%.0f", axs_ringWindow.windowLevel);
-    return axs_ringWindow;
-}
-
 static BOOL axs_ring_bundleExcluded(NSString *bundle, AxsHoldLaunchConfig *config) {
     if (bundle.length == 0) return NO;
     NSArray *list = [config axs_holdlaunch_ringExcludedApplications];
@@ -331,24 +311,22 @@ static UIBezierPath *axs_ring_path(CGRect frame, CGFloat radius) {
                                        cornerRadii:CGSizeMake(radius, radius)];
 }
 
-// rebuild all layers for one entry (style/params changed, or first attach)
+// rebuild all layers for one entry (style/params changed, or first attach).
+// Layers go straight into the floating window's own layer tree.
 static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
-                                 NSMutableDictionary *m, BOOL docked, AxsHoldLaunchConfig *config) {
+                                 BOOL docked, AxsHoldLaunchConfig *config) {
     axs_ring_detachLayers(key);
 
-    UIWindow *overlay = axs_ring_ensureOverlayWindow(host.windowLevel);
-    UIView *overlayRoot = overlay.rootViewController.view;
-    CGFloat z = host.windowLevel;
+    BOOL miniOn = [config axs_holdlaunch_isTheirMiniRingEnabled];
+    BOOL drawThis = docked ? miniOn : [config axs_holdlaunch_isTheirRingEnabled];
+    if (!drawThis || host == nil) return;
 
-    BOOL floatRing = [config axs_holdlaunch_isTheirRingEnabled];
-    BOOL floatOn = (!docked && floatRing) || (docked && [config axs_holdlaunch_isTheirMiniRingEnabled]);
-    if (!floatOn) return;
-
-    CGRect frame = [view convertRect:view.bounds toView:overlayRoot];
+    CGRect frame = [view convertRect:view.bounds toView:host];
     CGFloat radius = docked ? view.layer.cornerRadius : [config axs_holdlaunch_splitWindowCornerRadius];
     if (docked && radius < 1) radius = 14.0;
 
     NSMutableArray<CALayer *> *layers = [NSMutableArray array];
+    CGFloat z = 9999.0; // above the floating content inside its own window
 
     // one color drives both the frame and its glow (LingDong behaviour):
     // random > custom > default blue
@@ -372,7 +350,7 @@ static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
         ring.lineWidth = [config axs_holdlaunch_ringFrameWidth];
         ring.opacity = (float)frameAlpha;
         ring.zPosition = z;
-        [overlayRoot.layer addSublayer:ring];
+        [host.layer addSublayer:ring];
         [layers addObject:ring];
     }
 
@@ -389,7 +367,7 @@ static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
         glow.lineWidth = (range < 1) ? 1 : range;
         glow.opacity = 0.35;
         glow.zPosition = z;
-        [overlayRoot.layer addSublayer:glow];
+        [host.layer addSublayer:glow];
         [layers addObject:glow];
     }
 
@@ -414,7 +392,7 @@ static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
         inner.lineWidth = [config axs_holdlaunch_ringInnerWidth];
         inner.opacity = 1.0;
         inner.zPosition = z;
-        [overlayRoot.layer addSublayer:inner];
+        [host.layer addSublayer:inner];
         [layers addObject:inner];
     }
 
@@ -429,8 +407,6 @@ static void axs_ring_tick(void) {
         BOOL floatOn = [config axs_holdlaunch_isTheirRingEnabled];
         BOOL miniOn = [config axs_holdlaunch_isTheirMiniRingEnabled];
 
-        CGFloat maxHostLevel = 0;
-        BOOL haveHost = NO;
         int drawn = 0;
 
         for (NSString *key in [axs_meta allKeys]) {
@@ -469,14 +445,7 @@ static void axs_ring_tick(void) {
                 continue;
             }
 
-            if (!haveHost || host.windowLevel > maxHostLevel) {
-                maxHostLevel = host.windowLevel;
-                haveHost = YES;
-            }
-
-            UIWindow *overlay = axs_ring_ensureOverlayWindow(maxHostLevel);
-            UIView *overlayRoot = overlay.rootViewController.view;
-            CGRect frame = [view convertRect:view.bounds toView:overlayRoot];
+            CGRect frame = [view convertRect:view.bounds toView:host];
             CGFloat minWidth = docked ? 16.0 : 40.0;
             if (frame.size.width <= minWidth) continue;
 
@@ -502,7 +471,7 @@ static void axs_ring_tick(void) {
                 bundle];
 
             if (![axs_styleSig[key] isEqualToString:styleSig]) {
-                axs_ring_buildLayers(key, view, host, m, docked, config);
+                axs_ring_buildLayers(key, view, host, docked, config);
                 axs_styleSig[key] = styleSig;
                 axs_frameSig[key] = @"";
                 if (axs_layers[key] == nil) continue; // switch turned off mid-build
@@ -521,7 +490,7 @@ static void axs_ring_tick(void) {
                 [CATransaction setDisableActions:YES];
                 for (CALayer *l in axs_layers[key]) {
                     if ([l isKindOfClass:[CAShapeLayer class]]) ((CAShapeLayer *)l).path = path.CGPath;
-                    l.zPosition = host.windowLevel;
+                    l.zPosition = 9999.0;
                 }
                 [CATransaction commit];
                 axs_frameSig[key] = frameSig;
@@ -530,13 +499,9 @@ static void axs_ring_tick(void) {
             drawn++;
         }
 
-        if (drawn > 0) {
-            if (axs_ringWindow.hidden) axs_ringWindow.hidden = NO;
-        } else if (axs_ringWindow != nil) {
-            // nothing to draw: tear the overlay window down (nil it, per spec)
+        if (drawn == 0) {
+            // nothing to draw: detach everything
             for (NSString *key in [axs_layers allKeys]) { axs_ring_detachLayers(key); }
-            [axs_ringWindow removeFromSuperview];
-            axs_ringWindow = nil;
         }
 
         // mapping empty or nothing drawn -> stop the display link entirely

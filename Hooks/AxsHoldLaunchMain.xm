@@ -188,12 +188,16 @@ static void axs_holdlaunch_dockedDidMove_imp(id self, SEL _cmd) {
     axs_ring_noteContainer(self, [(UIView *)self window], YES);
 }
 
-// sc_sessionDidBeginHosting: backup pairing feed (session -> container via KVC)
+// sc_sessionDidBeginHosting: backup pairing feed. Its real signature is not
+// confirmed - declaring the argument as void* keeps ARC from retaining a
+// non-object (objc_retain(0x1) crashed SpringBoard into safe mode); the
+// install step checks the actual type encoding before treating it as a session.
 static IMP axs_origHostingBegan = NULL;
+static BOOL axs_hostingArgIsObject = NO;
 
-static void axs_holdlaunch_hostingBegan_imp(id self, SEL _cmd, id session) {
-    if (axs_origHostingBegan) ((void(*)(id, SEL, id))axs_origHostingBegan)(self, _cmd, session);
-    axs_ring_sessionHostingBegan(session);
+static void axs_holdlaunch_hostingBegan_imp(id self, SEL _cmd, void *arg) {
+    if (axs_origHostingBegan) ((void(*)(id, SEL, void *))axs_origHostingBegan)(self, _cmd, arg);
+    if (axs_hostingArgIsObject) axs_ring_sessionHostingBegan((id)arg);
 }
 
 // Hook -didMoveToWindow on exactly these two ScreenCore classes. Hooking the
@@ -245,6 +249,12 @@ static NSArray<Class> *axs_holdlaunch_classesDeclaring(SEL selector) {
 static NSUInteger axs_holdlaunch_hookSelector(SEL selector, IMP replacement, IMP *original) {
     NSUInteger hooked = 0;
     for (Class cls in axs_holdlaunch_classesDeclaring(selector)) {
+        Method m = class_getInstanceMethod(cls, selector);
+        // log the true signature: an id-typed parameter on a method whose
+        // actual argument is a primitive gets ARC-retained and crashes
+        const char *types = m ? method_getTypeEncoding(m) : "?";
+        axs_holdlaunch_log(@"hook '%s' on %s types=%s",
+                           sel_getName(selector), class_getName(cls), types ?: "?");
         MSHookMessageEx(cls, selector, replacement, original);
         hooked++;
     }
@@ -265,6 +275,16 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger sessionForContainerCount = axs_holdlaunch_hookSelector(@selector(sc_sessionForContainerView:), (IMP)axs_holdlaunch_sessionForContainerView_imp, &axs_origSessionForContainerView);
     NSUInteger sessionForBundleCount = axs_holdlaunch_hookSelector(@selector(sc_sessionForBundleIdentifier:), (IMP)axs_holdlaunch_sessionForBundle_imp, &axs_origSessionForBundle);
     NSUInteger closeSessionCount = axs_holdlaunch_hookSelector(@selector(sc_closeSession:animated:), (IMP)axs_holdlaunch_closeSession_imp, &axs_origCloseSession);
+    // verify sc_sessionDidBeginHosting:'s first argument is an object before
+    // treating it as a session (types = ret, ':', arg1, ...)
+    for (Class hostingCls in axs_holdlaunch_classesDeclaring(@selector(sc_sessionDidBeginHosting:))) {
+        Method m = class_getInstanceMethod(hostingCls, @selector(sc_sessionDidBeginHosting:));
+        if (!m) continue;
+        const char *types = method_getTypeEncoding(m);
+        axs_hostingArgIsObject = (types != NULL && strlen(types) > 2 && types[2] == '@');
+        axs_holdlaunch_log(@"hosting began types=%s argIsObject=%d", types ?: "?", (int)axs_hostingArgIsObject);
+        break;
+    }
     NSUInteger hostingCount = axs_holdlaunch_hookSelector(@selector(sc_sessionDidBeginHosting:), (IMP)axs_holdlaunch_hostingBegan_imp, &axs_origHostingBegan);
 
     // dockSession has per-class originals - see the hook comment above
