@@ -75,6 +75,8 @@ static NSString *axs_ring_keyFor(id object) {
 
 // --- C API fed by AxsHoldLaunchMain.xm hooks ---
 
+void axs_ring_engine_wake(void);
+
 void axs_ring_setSessionBundle(id session, NSString *bundle) {
     if (session == nil || ![bundle isKindOfClass:[NSString class]]) return;
     if (axs_sessionBundle == nil) axs_sessionBundle = [NSMutableDictionary new];
