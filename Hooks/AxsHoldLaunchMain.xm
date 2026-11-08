@@ -107,9 +107,12 @@ static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     // system-tool:* entries are menu items, not app windows - skip them.
     if (![bundle hasPrefix:@"system-tool:"]) {
         NSString *previous = axs_prevRealBundle;
+        AxsHoldLaunchConfig *config = [AxsHoldLaunchConfig axs_holdlaunch_shared];
+        BOOL gated = [config axs_holdlaunch_isTheirCallbackCloseEnabled]
+                  || [config axs_holdlaunch_isTheirSingleWindowEnabled];
         if (previous.length > 0
             && ![bundle isEqualToString:previous]
-            && [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isTheirCallbackCloseEnabled]) {
+            && gated) {
             NSTimeInterval gap = axs_holdlaunch_now() - axs_prevRealTime;
             if (gap >= 2.0 && gap <= 180.0) {
                 axs_holdlaunch_closeSessionForBundle(previous,
@@ -174,7 +177,18 @@ static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) 
             axs_holdlaunch_log(@"session manager captured: %@", NSStringFromClass([self class]));
         }
     }
+    if ([bundleIdentifier isKindOfClass:[NSString class]]) {
+        axs_holdlaunch_log(@"sessionFor bundle=%@", bundleIdentifier);
+    }
     return ((id(*)(id, SEL, id))axs_origSessionFor)(self, _cmd, bundleIdentifier);
+}
+
+static IMP axs_origCloseSession = NULL;
+
+static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, id session, BOOL animated) {
+    axs_holdlaunch_log(@"closeSession <%@:%p> animated=%d",
+                       NSStringFromClass([session class]), session, animated);
+    ((void(*)(id, SEL, id, BOOL))axs_origCloseSession)(self, _cmd, session, animated);
 }
 
 static BOOL axs_springboardHooksInstalled = NO;
@@ -227,11 +241,14 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     // Captures SCFloatingSceneManager so the auto-close can resolve sessions.
     SEL selSessionFor = @selector(sc_sessionForBundleIdentifier:);
     NSUInteger sessionForCount = axs_holdlaunch_hookSelector(selSessionFor, (IMP)axs_holdlaunch_sessionFor_imp, &axs_origSessionFor);
+    SEL selCloseSession = @selector(sc_closeSession:animated:);
+    NSUInteger closeCount = axs_holdlaunch_hookSelector(selCloseSession, (IMP)axs_holdlaunch_closeSession_imp, &axs_origCloseSession);
 
-    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu sessionFor=%lu",
+    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu sessionFor=%lu close=%lu | callback-close gate=%d",
                        (unsigned long)setBundleCount,
                        (unsigned long)modeCount, (unsigned long)arcModeCount,
-                       (unsigned long)sessionForCount);
+                       (unsigned long)sessionForCount, (unsigned long)closeCount,
+                       [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isTheirCallbackCloseEnabled]);
 }
 
 // ---------------------------------------------------------------------------

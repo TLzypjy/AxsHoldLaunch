@@ -76,6 +76,13 @@ static void axs_holdlaunch_preferencesDidChange(CFNotificationCenterRef center, 
     return exists ? (BOOL)enabled : NO;
 }
 
+- (BOOL)axs_holdlaunch_isTheirSingleWindowEnabled {
+    Boolean exists = NO;
+    Boolean enabled = CFPreferencesGetAppBooleanValue(CFSTR("splitSingleActiveWindowEnabled"),
+                                                      CFSTR("com.susudear.screencoreprefs"), &exists);
+    return exists ? (BOOL)enabled : NO;
+}
+
 - (void)dealloc {
     CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                             (__bridge const void *)self);
