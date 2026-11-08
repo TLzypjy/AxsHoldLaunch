@@ -87,7 +87,6 @@ static IMP axs_origArcGestureMode = NULL;
 static IMP axs_origSessionForContainerView = NULL;
 static IMP axs_origSessionForBundle = NULL;
 static IMP axs_origCloseSession = NULL;
-static IMP axs_origDockSession = NULL;
 
 static void axs_holdlaunch_recordArrival(NSString *bundle) {
     if (![bundle isKindOfClass:[NSString class]] || bundle.length == 0) return;
@@ -153,9 +152,24 @@ static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, id session, BOOL 
     ((void(*)(id, SEL, id, BOOL))axs_origCloseSession)(self, _cmd, session, animated);
 }
 
+// sc_dockSession:fromCorner: is declared by TWO ScreenCore classes, so the
+// original IMP must be tracked per class - a single pointer would let class
+// A call class B's implementation and silently break the dock gesture.
+static Class axs_dockHookedClasses[4];
+static IMP axs_dockOrigImps[4];
+static int axs_dockHookedCount = 0;
+
 static id axs_holdlaunch_dockSession_imp(id self, SEL _cmd, id session, unsigned long fromCorner) {
+    Class cls = object_getClass(self);
+    IMP orig = NULL;
+    for (int i = 0; i < axs_dockHookedCount; i++) {
+        if (axs_dockHookedClasses[i] == cls) { orig = axs_dockOrigImps[i]; break; }
+    }
     axs_ring_sessionDocked(session);
-    return ((id(*)(id, SEL, id, unsigned long))axs_origDockSession)(self, _cmd, session, fromCorner);
+    if (orig != NULL) {
+        return ((id(*)(id, SEL, id, unsigned long))orig)(self, _cmd, session, fromCorner);
+    }
+    return nil;
 }
 
 // didMoveToWindow hooks: the ring registry's primary feed. A floating
@@ -251,8 +265,20 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger sessionForContainerCount = axs_holdlaunch_hookSelector(@selector(sc_sessionForContainerView:), (IMP)axs_holdlaunch_sessionForContainerView_imp, &axs_origSessionForContainerView);
     NSUInteger sessionForBundleCount = axs_holdlaunch_hookSelector(@selector(sc_sessionForBundleIdentifier:), (IMP)axs_holdlaunch_sessionForBundle_imp, &axs_origSessionForBundle);
     NSUInteger closeSessionCount = axs_holdlaunch_hookSelector(@selector(sc_closeSession:animated:), (IMP)axs_holdlaunch_closeSession_imp, &axs_origCloseSession);
-    NSUInteger dockSessionCount = axs_holdlaunch_hookSelector(@selector(sc_dockSession:fromCorner:), (IMP)axs_holdlaunch_dockSession_imp, &axs_origDockSession);
     NSUInteger hostingCount = axs_holdlaunch_hookSelector(@selector(sc_sessionDidBeginHosting:), (IMP)axs_holdlaunch_hostingBegan_imp, &axs_origHostingBegan);
+
+    // dockSession has per-class originals - see the hook comment above
+    NSUInteger dockSessionCount = 0;
+    for (Class dockCls in axs_holdlaunch_classesDeclaring(@selector(sc_dockSession:fromCorner:))) {
+        if (axs_dockHookedCount >= 4) break;
+        Method m = class_getInstanceMethod(dockCls, @selector(sc_dockSession:fromCorner:));
+        if (!m) continue;
+        axs_dockHookedClasses[axs_dockHookedCount] = dockCls;
+        axs_dockOrigImps[axs_dockHookedCount] = method_getImplementation(m);
+        axs_dockHookedCount++;
+        MSHookMessageEx(dockCls, @selector(sc_dockSession:fromCorner:), (IMP)axs_holdlaunch_dockSession_imp, NULL);
+        dockSessionCount++;
+    }
 
     NSUInteger containerDidMoveCount = axs_holdlaunch_hookDidMove("SCFloatingContainerView", (IMP)axs_holdlaunch_containerDidMove_imp, &axs_origContainerDidMove);
     NSUInteger dockedDidMoveCount = axs_holdlaunch_hookDidMove("SCDockedFloatingItemView", (IMP)axs_holdlaunch_dockedDidMove_imp, &axs_origDockedDidMove);
@@ -555,6 +581,137 @@ static UITableViewCell *axs_ringPage_sliderCell(id self, UITableView *tableView,
     return cell;
 }
 
+// Color row, matching the LingDong look: blue label, "#RRGGBB:0.80" subtitle
+// underneath, round swatch on the right; tapping opens the color picker.
+static UITableViewCell *axs_ringPage_colorCell(id self, UITableView *tableView, PSSpecifier *spec) {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"AXSRingColor"];
+    if (cell == nil) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                     reuseIdentifier:@"AXSRingColor"];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+        UILabel *title = [UILabel new];
+        title.tag = 201;
+        title.font = [UIFont systemFontOfSize:17];
+        title.textColor = [UIColor systemBlueColor];
+        title.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:title];
+
+        UILabel *subtitle = [UILabel new];
+        subtitle.tag = 202;
+        subtitle.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightRegular];
+        subtitle.textColor = [UIColor secondaryLabelColor];
+        subtitle.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:subtitle];
+
+        UIButton *swatch = [UIButton buttonWithType:UIButtonTypeCustom];
+        swatch.tag = 203;
+        swatch.layer.cornerRadius = 16;
+        swatch.layer.borderWidth = 1.5;
+        swatch.layer.borderColor = [UIColor colorWithWhite:0.75 alpha:1.0].CGColor;
+        swatch.userInteractionEnabled = YES;
+        swatch.translatesAutoresizingMaskIntoConstraints = NO;
+        [swatch addTarget:self action:@selector(axs_ringColorTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [cell.contentView addSubview:swatch];
+
+        UILayoutGuide *margin = cell.contentView.layoutMarginsGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            [title.leadingAnchor constraintEqualToAnchor:margin.leadingAnchor],
+            [title.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:9],
+            [subtitle.leadingAnchor constraintEqualToAnchor:margin.leadingAnchor],
+            [subtitle.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:1],
+            [subtitle.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-9],
+            [swatch.trailingAnchor constraintEqualToAnchor:margin.trailingAnchor],
+            [swatch.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [swatch.widthAnchor constraintEqualToConstant:32],
+            [swatch.heightAnchor constraintEqualToConstant:32],
+        ]];
+    }
+
+    NSString *key = [spec propertyForKey:@"key"];
+    NSString *hex = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:key defaultValue:nil];
+    UIColor *color = axs_holdlaunch_hexToColor(hex, [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
+
+    double alpha = 1.0;
+    if ([key isEqualToString:AxsHoldLaunchKeyRingColor]) {
+        id a = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:@"splitWindowRingFrameAlpha" defaultValue:@(0.5)];
+        alpha = [a isKindOfClass:[NSNumber class]] ? [a doubleValue] : 0.5;
+    }
+    NSString *hexText = (hex.length > 0) ? hex : @"#34A1FF";
+
+    UILabel *title = (UILabel *)[cell viewWithTag:201];
+    title.text = axs_ring_page_localized(self, [spec propertyForKey:@"label"]);
+    ((UILabel *)[cell viewWithTag:202]).text =
+        [NSString stringWithFormat:@"%@:%.2f", hexText, alpha];
+    UIButton *swatch = (UIButton *)[cell viewWithTag:203];
+    swatch.backgroundColor = color;
+    objc_setAssociatedObject(swatch, @selector(axsRingColorKey), key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return cell;
+}
+
+// Switch row with an inline gray note under the label (KTV mode / random
+// color rows in the LingDong layout).
+static UITableViewCell *axs_ringPage_noteSwitchCell(id self, UITableView *tableView, PSSpecifier *spec) {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"AXSRingNoteSwitch"];
+    if (cell == nil) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                     reuseIdentifier:@"AXSRingNoteSwitch"];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+        UILabel *title = [UILabel new];
+        title.tag = 211;
+        title.font = [UIFont systemFontOfSize:17];
+        title.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:title];
+
+        UILabel *note = [UILabel new];
+        note.tag = 212;
+        note.font = [UIFont systemFontOfSize:11];
+        note.textColor = [UIColor secondaryLabelColor];
+        note.numberOfLines = 0;
+        note.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:note];
+
+        UISwitch *toggle = [UISwitch new];
+        toggle.tag = 213;
+        toggle.translatesAutoresizingMaskIntoConstraints = NO;
+        [toggle addTarget:self action:@selector(axs_ringSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+        [cell.contentView addSubview:toggle];
+
+        UILayoutGuide *margin = cell.contentView.layoutMarginsGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            [title.leadingAnchor constraintEqualToAnchor:margin.leadingAnchor],
+            [title.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:9],
+            [note.leadingAnchor constraintEqualToAnchor:margin.leadingAnchor],
+            [note.trailingAnchor constraintLessThanOrEqualToAnchor:toggle.leadingAnchor constant:-12],
+            [note.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:1],
+            [note.bottomAnchor constraintLessThanOrEqualToAnchor:cell.contentView.bottomAnchor constant:-9],
+            [toggle.trailingAnchor constraintEqualToAnchor:margin.trailingAnchor],
+            [toggle.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        ]];
+    }
+
+    UILabel *title = (UILabel *)[cell viewWithTag:211];
+    title.text = axs_ring_page_localized(self, [spec propertyForKey:@"label"]);
+    UILabel *note = (UILabel *)[cell viewWithTag:212];
+    note.text = axs_ring_page_localized(self, [spec propertyForKey:@"note"]);
+
+    UISwitch *toggle = (UISwitch *)[cell viewWithTag:213];
+    id read = [self respondsToSelector:@selector(readPreferenceValue:)]
+        ? [self readPreferenceValue:spec] : nil;
+    toggle.on = [read isKindOfClass:[NSNumber class]] ? [read boolValue] : NO;
+    objc_setAssociatedObject(toggle, @selector(axsRingSpec), spec, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return cell;
+}
+
+static void axs_ringPage_switchChanged_imp(id self, SEL _cmd, UISwitch *sender) {
+    PSSpecifier *spec = objc_getAssociatedObject(sender, @selector(axsRingSpec));
+    if (spec == nil) return;
+    [self setPreferenceValue:@(sender.on) specifier:spec];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        CFSTR("com.susudear.screencoreprefs/saved"), NULL, NULL, true);
+}
+
 static id axs_ringPage_cellForRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
     @try {
         PSSpecifier *spec = nil;
@@ -565,35 +722,15 @@ static id axs_ringPage_cellForRow_imp(id self, SEL _cmd, id tableView, id indexP
         if ([cellType isEqualToString:@"PSSliderCell"]) {
             return axs_ringPage_sliderCell(self, tableView, spec);
         }
+        NSString *key = [spec propertyForKey:@"key"];
+        if (axs_ring_page_isColorKey(key)) {
+            return axs_ringPage_colorCell(self, tableView, spec);
+        }
+        if ([spec propertyForKey:@"note"] != nil) {
+            return axs_ringPage_noteSwitchCell(self, tableView, spec);
+        }
 
         UITableViewCell *cell = ((UITableViewCell *(*)(id, SEL, id, id))axs_ringPage_origCellForRow)(self, _cmd, tableView, indexPath);
-        NSString *key = [spec propertyForKey:@"key"];
-
-        if (axs_ring_page_isColorKey(key)) {
-            // #RRGGBB text + round swatch button, per the LingDong layout
-            NSString *hex = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:key defaultValue:nil];
-            UIColor *color = axs_holdlaunch_hexToColor(hex, [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
-
-            UIView *accessory = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 112, 30)];
-            UILabel *hexLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 4, 68, 22)];
-            hexLabel.text = (hex.length > 0) ? hex : @"#34A1FF";
-            hexLabel.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
-            hexLabel.textColor = [UIColor secondaryLabelColor];
-            hexLabel.textAlignment = NSTextAlignmentRight;
-            [accessory addSubview:hexLabel];
-
-            UIButton *dot = [UIButton buttonWithType:UIButtonTypeCustom];
-            dot.frame = CGRectMake(78, 0, 30, 30);
-            dot.backgroundColor = color;
-            dot.layer.cornerRadius = 15;
-            dot.layer.borderWidth = 1.5;
-            dot.layer.borderColor = [UIColor colorWithWhite:0.75 alpha:1.0].CGColor;
-            dot.userInteractionEnabled = YES;
-            objc_setAssociatedObject(dot, @selector(axsRingColorKey), key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [dot addTarget:self action:@selector(axs_ringColorTapped:) forControlEvents:UIControlEventTouchUpInside];
-            [accessory addSubview:dot];
-            cell.accessoryView = accessory;
-        }
 
         if ([key isEqualToString:AxsHoldLaunchKeyExclude]) {
             NSString *subtitle = axs_ringPage_subtitle_imp(self, _cmd, spec);
@@ -711,6 +848,7 @@ static void axs_holdlaunch_installSettingsHooks(void) {
     class_addMethod(cls, @selector(axs_ringMinus:), (IMP)axs_ringPage_minus_imp, "v@:@");
     class_addMethod(cls, @selector(axs_ringPlus:), (IMP)axs_ringPage_plus_imp, "v@:@");
     class_addMethod(cls, @selector(axs_ringSliderChanged:), (IMP)axs_ringPage_sliderChanged_imp, "v@:@");
+    class_addMethod(cls, @selector(axs_ringSwitchChanged:), (IMP)axs_ringPage_switchChanged_imp, "v@:@");
     class_addMethod(cls, @selector(axs_ringColorTapped:), (IMP)axs_ringPage_colorTapped_imp, "v@:@");
     class_addMethod(cls, @selector(colorPickerControllerDidFinish:), (IMP)axs_holdlaunch_colorPickerDidFinish_imp, "v@:@");
 

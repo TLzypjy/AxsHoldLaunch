@@ -233,17 +233,15 @@ void axs_ring_sessionClosed(id session) {
     }
 }
 
-// sc_dockSession:fromCorner: - mark the session's floating entries docked and
-// register/bind the docked mini item view when the session exposes one
+// sc_dockSession:fromCorner: fires on every layout pass, not only when the
+// user docks - so this must NOT mark floating entries as docked (that made
+// the ring detach/rebuild in a loop and never show). The only useful thing
+// here is registering the docked mini item view when the session exposes one;
+// docked minis otherwise register themselves via -didMoveToWindow.
 void axs_ring_sessionDocked(id session) {
     if (session == nil) return;
     axs_ring_ensureMaps();
     NSString *sessionKey = axs_ring_keyFor(session);
-    NSUInteger marked = 0;
-    for (NSString *key in [axs_meta allKeys]) {
-        NSMutableDictionary *m = axs_meta[key];
-        if ([m[@"session"] isEqualToString:sessionKey]) { m[@"docked"] = @YES; marked++; }
-    }
     id item = nil;
     @try { item = [session valueForKey:@"dockedItemView"]; } @catch (NSException *e) { }
     if (![item isKindOfClass:[UIView class]]) {
@@ -268,7 +266,6 @@ void axs_ring_sessionDocked(id session) {
             m[@"excluded"] = nil;
         }
     }
-    axs_ring_engine_log(@"ring session docked: session=%p floatEntries=%lu", session, (unsigned long)marked);
     axs_ring_engine_wake();
 }
 
@@ -353,41 +350,41 @@ static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
 
     NSMutableArray<CALayer *> *layers = [NSMutableArray array];
 
-    // 外框: switch, width 0-30 (default 2), alpha 0-1 (default 0.5), custom/random color
-    if ([config axs_holdlaunch_ringFrameEnabled]) {
-        UIColor *color;
-        if ([config axs_holdlaunch_ringFrameRandomColor]) {
-            color = axs_ring_randomColor();
-        } else if ([config axs_holdlaunch_ringFrameCustomEnabled]) {
-            color = axs_ring_parseHex([config axs_holdlaunch_ringFrameColor],
+    // one color drives both the frame and its glow (LingDong behaviour):
+    // random > custom > default blue
+    UIColor *ringColor;
+    if ([config axs_holdlaunch_ringFrameRandomColor]) {
+        ringColor = axs_ring_randomColor();
+    } else if ([config axs_holdlaunch_ringFrameCustomEnabled]) {
+        ringColor = axs_ring_parseHex([config axs_holdlaunch_ringFrameColor],
                                       axs_ring_parseHex(@"#34A1FF", nil));
-        } else {
-            color = axs_ring_parseHex(@"#34A1FF", nil);
-        }
+    } else {
+        ringColor = axs_ring_parseHex(@"#34A1FF", nil);
+    }
+    CGFloat frameAlpha = [config axs_holdlaunch_ringFrameAlpha];
+
+    // 外框: width 0-30 (default 2), alpha 0-1 (default 0.5)
+    {
         CAShapeLayer *ring = [CAShapeLayer layer];
         ring.path = axs_ring_path(frame, radius).CGPath;
-        ring.strokeColor = color.CGColor;
+        ring.strokeColor = ringColor.CGColor;
         ring.fillColor = nil;
         ring.lineWidth = [config axs_holdlaunch_ringFrameWidth];
-        ring.opacity = (float)[config axs_holdlaunch_ringFrameAlpha];
+        ring.opacity = (float)frameAlpha;
         ring.zPosition = z;
         [overlayRoot.layer addSublayer:ring];
         [layers addObject:ring];
     }
 
-    // 光晕: switch, custom color, range 0-50 (default 6), offsets -50..50
+    // 光晕: spread = range 0-50 (default 6), same hue as the frame, offsets
     if ([config axs_holdlaunch_ringGlowEnabled]) {
-        UIColor *color = [config axs_holdlaunch_ringGlowCustomEnabled]
-            ? axs_ring_parseHex([config axs_holdlaunch_ringGlowColor],
-                                axs_ring_parseHex(@"#FFFFFF", nil))
-            : axs_ring_parseHex(@"#FFFFFF", nil);
         CGRect glowFrame = CGRectOffset(frame,
                                         [config axs_holdlaunch_ringGlowOffsetX],
                                         -[config axs_holdlaunch_ringGlowOffsetY]);
         CGFloat range = [config axs_holdlaunch_ringGlowRange];
         CAShapeLayer *glow = [CAShapeLayer layer];
         glow.path = axs_ring_path(glowFrame, radius).CGPath;
-        glow.strokeColor = color.CGColor;
+        glow.strokeColor = ringColor.CGColor;
         glow.fillColor = nil;
         glow.lineWidth = (range < 1) ? 1 : range;
         glow.opacity = 0.35;
@@ -396,12 +393,17 @@ static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
         [layers addObject:glow];
     }
 
-    // 内圈: switch, width 1-30 (default 2), color, random
+    // 内圈: switch, width 1-30 (default 2), custom color, random
     if ([config axs_holdlaunch_ringInnerEnabled]) {
-        UIColor *color = [config axs_holdlaunch_ringInnerRandomColor]
-            ? axs_ring_randomColor()
-            : axs_ring_parseHex([config axs_holdlaunch_ringInnerColor],
-                                axs_ring_parseHex(@"#CBD0FF", nil));
+        UIColor *color;
+        if ([config axs_holdlaunch_ringInnerRandomColor]) {
+            color = axs_ring_randomColor();
+        } else if ([config axs_holdlaunch_ringInnerCustomEnabled]) {
+            color = axs_ring_parseHex([config axs_holdlaunch_ringInnerColor],
+                                      axs_ring_parseHex(@"#CBD0FF", nil));
+        } else {
+            color = axs_ring_parseHex(@"#CBD0FF", nil);
+        }
         CGFloat inset = [config axs_holdlaunch_ringFrameWidth] / 2
                       + [config axs_holdlaunch_ringInnerWidth] / 2 + 2;
         CGRect innerFrame = CGRectInset(frame, inset, inset);
@@ -480,22 +482,20 @@ static void axs_ring_tick(void) {
 
             // style signature: rebuild only when a style parameter changed
             NSString *styleSig = [NSString stringWithFormat:
-                @"%@|%.1f|f=%d,%.2f,%.2f,%d,%@,%d|g=%d,%d,%@,%.1f,%.1f,%.1f|i=%d,%.1f,%@,%d|b=%@",
+                @"%@|%.1f|f=%.2f,%.2f,%d,%@,%d|g=%d,%.1f,%.1f,%.1f|i=%d,%d,%.1f,%@,%d|b=%@",
                 docked ? @"d" : @"f",
                 docked ? view.layer.cornerRadius : [config axs_holdlaunch_splitWindowCornerRadius],
-                (int)[config axs_holdlaunch_ringFrameEnabled],
                 [config axs_holdlaunch_ringFrameWidth],
                 [config axs_holdlaunch_ringFrameAlpha],
                 (int)[config axs_holdlaunch_ringFrameCustomEnabled],
                 [config axs_holdlaunch_ringFrameColor],
                 (int)[config axs_holdlaunch_ringFrameRandomColor],
                 (int)[config axs_holdlaunch_ringGlowEnabled],
-                (int)[config axs_holdlaunch_ringGlowCustomEnabled],
-                [config axs_holdlaunch_ringGlowColor],
                 [config axs_holdlaunch_ringGlowRange],
                 [config axs_holdlaunch_ringGlowOffsetX],
                 [config axs_holdlaunch_ringGlowOffsetY],
                 (int)[config axs_holdlaunch_ringInnerEnabled],
+                (int)[config axs_holdlaunch_ringInnerCustomEnabled],
                 [config axs_holdlaunch_ringInnerWidth],
                 [config axs_holdlaunch_ringInnerColor],
                 (int)[config axs_holdlaunch_ringInnerRandomColor],

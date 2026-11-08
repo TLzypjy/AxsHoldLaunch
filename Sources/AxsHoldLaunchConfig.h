@@ -23,23 +23,21 @@
 - (double)axs_holdlaunch_splitWindowCornerRadius;
 
 // 外框组
-- (BOOL)axs_holdlaunch_ringFrameEnabled;        // splitWindowRingFrameEnabled
 - (double)axs_holdlaunch_ringFrameWidth;        // splitWindowRingFrameWidth 0-30
 - (double)axs_holdlaunch_ringFrameAlpha;        // splitWindowRingFrameAlpha 0-1
 - (BOOL)axs_holdlaunch_ringFrameCustomEnabled;  // splitWindowRingFrameCustomEnabled
 - (NSString *)axs_holdlaunch_ringFrameColor;    // splitWindowRingFrameColor
 - (BOOL)axs_holdlaunch_ringFrameRandomColor;    // splitWindowRingFrameRandomColor
 
-// 光晕组
+// 光晕组（光晕与外框同色，见引擎）
 - (BOOL)axs_holdlaunch_ringGlowEnabled;         // splitWindowGlowEnabled
-- (BOOL)axs_holdlaunch_ringGlowCustomEnabled;   // splitWindowGlowCustomEnabled
-- (NSString *)axs_holdlaunch_ringGlowColor;     // splitWindowGlowColor
 - (double)axs_holdlaunch_ringGlowRange;         // splitWindowGlowRange 0-50
 - (double)axs_holdlaunch_ringGlowOffsetY;       // splitWindowGlowOffsetY -50..50
 - (double)axs_holdlaunch_ringGlowOffsetX;       // splitWindowGlowOffsetX -50..50
 
 // 内圈组
 - (BOOL)axs_holdlaunch_ringInnerEnabled;        // splitWindowRingInnerEnabled
+- (BOOL)axs_holdlaunch_ringInnerCustomEnabled;  // splitWindowRingInnerCustomEnabled
 - (double)axs_holdlaunch_ringInnerWidth;        // splitWindowRingInnerWidth 1-30
 - (NSString *)axs_holdlaunch_ringInnerColor;    // splitWindowRingInnerColor
 - (BOOL)axs_holdlaunch_ringInnerRandomColor;    // splitWindowRingInnerRandomColor

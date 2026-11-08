@@ -156,10 +156,6 @@ static NSString *axs_theirString(AxsHoldLaunchConfig *config, NSString *key, NSS
 
 #pragma mark - 外框组
 
-- (BOOL)axs_holdlaunch_ringFrameEnabled {
-    return axs_theirBool(self, @"splitWindowRingFrameEnabled", YES);
-}
-
 - (double)axs_holdlaunch_ringFrameWidth {
     return axs_theirDouble(self, @"splitWindowRingFrameWidth", 2.0, 0, 30);
 }
@@ -186,14 +182,6 @@ static NSString *axs_theirString(AxsHoldLaunchConfig *config, NSString *key, NSS
     return axs_theirBool(self, @"splitWindowGlowEnabled", YES);
 }
 
-- (BOOL)axs_holdlaunch_ringGlowCustomEnabled {
-    return axs_theirBool(self, @"splitWindowGlowCustomEnabled", NO);
-}
-
-- (NSString *)axs_holdlaunch_ringGlowColor {
-    return axs_theirString(self, @"splitWindowGlowColor", @"#FFFFFF");
-}
-
 - (double)axs_holdlaunch_ringGlowRange {
     return axs_theirDouble(self, @"splitWindowGlowRange", 6.0, 0, 50);
 }
@@ -210,6 +198,10 @@ static NSString *axs_theirString(AxsHoldLaunchConfig *config, NSString *key, NSS
 
 - (BOOL)axs_holdlaunch_ringInnerEnabled {
     return axs_theirBool(self, @"splitWindowRingInnerEnabled", NO);
+}
+
+- (BOOL)axs_holdlaunch_ringInnerCustomEnabled {
+    return axs_theirBool(self, @"splitWindowRingInnerCustomEnabled", NO);
 }
 
 - (double)axs_holdlaunch_ringInnerWidth {
