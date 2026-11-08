@@ -25,3 +25,13 @@ static inline NSString *axs_holdlaunch_preferencesPath(void) {
     return path;
 #endif
 }
+
+// ScreenCore 原装设置域 (光圈设置读这里)
+static inline NSString *axs_holdlaunch_theirPreferencesPath(void) {
+    NSString *path = @"/var/mobile/Library/Preferences/com.susudear.screencoreprefs.plist";
+#ifdef THEOS_PACKAGE_SCHEME_ROOTHIDE
+    return jbroot(path);
+#else
+    return path;
+#endif
+}

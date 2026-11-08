@@ -6,14 +6,12 @@
 #import "AxsHoldLaunchPrivate.h"
 
 // ---------------------------------------------------------------------------
-// Hold-to-launch: ARC 菜单长按松手触发
-//
-// ScreenCore 的打开方式决策读取 splitGestureLaunchMode (long: 0 = 分屏,
-// 1 = 全屏, 见设置页 validValues)。本 tweak 只做两件事:
-//   1. setSelectedBundleIdentifier: 记录手指落到菜单图标的时刻 (dwell 起点)
-//   2. 打开方式 getter 被决策读取时, 按 dwell >= 阈值改写返回值 (一次有效)
-// 钩子全部为签名确认安全的类型 (字符串 setter + 纯 long getter)。
-// ---------------------------------------------------------------------------
+// Hold-to-launch: ARC 閼挎粌宕熼梹鎸庡瘻閺夌偓澧滅憴锕€褰?//
+// ScreenCore 閻ㄥ嫭澧﹀鈧弬鐟扮础閸愬磭鐡ョ拠璇插絿 splitGestureLaunchMode (long: 0 = 閸掑棗鐫?
+// 1 = 閸忋劌鐫? 鐟欎浇顔曠純顕€銆?validValues)閵嗗倹婀?tweak 閸欘亜浠涙稉銈勬娴?
+//   1. setSelectedBundleIdentifier: 鐠佹澘缍嶉幍瀣瘹閽€钘夊煂閼挎粌宕熼崶鐐垼閻ㄥ嫭妞傞崚?(dwell 鐠ч鍋?
+//   2. 閹垫挸绱戦弬鐟扮础 getter 鐞氼偄鍠呯粵鏍嚢閸欐牗妞? 閹?dwell >= 闂冨牆鈧吋鏁奸崘娆掔箲閸ョ偛鈧?(娑撯偓濞嗏剝婀侀弫?
+// 闁解晛鐡欓崗銊╁劥娑撹櫣顒烽崥宥団€樼拋銈呯暔閸忋劎娈戠猾璇茬€?(鐎涙顑佹稉?setter + 缁?long getter)閵?// ---------------------------------------------------------------------------
 
 static NSTimeInterval axs_holdlaunch_now(void) {
     return [[NSDate date] timeIntervalSince1970];
@@ -67,6 +65,13 @@ static void axs_holdlaunch_recordArrival(NSString *bundle) {
     axs_arrivalBundle = bundle;
     axs_arrivalTime = axs_holdlaunch_now();
 }
+
+// Ring engine C API (defined in AXSRingEngine.xm)
+void axs_ring_setSessionBundle(id session, NSString *bundle);
+void axs_ring_noteContainerForSession(id container, id session);
+void axs_ring_sessionClosed(id session);
+void axs_ring_sessionDocked(id session);
+void axs_ring_engine_wake(void);
 
 static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     ((void(*)(id, SEL, id))axs_origSetSelectedBundle)(self, _cmd, bundle);
@@ -143,6 +148,34 @@ static NSUInteger axs_holdlaunch_hookSelector(SEL selector, IMP replacement, IMP
     return hooked;
 }
 
+// Ring engine feed hooks (all signature-safe: object args, object/void returns)
+static IMP axs_origSessionForContainerView = NULL;
+static IMP axs_origSessionForBundle = NULL;
+static IMP axs_origCloseSession = NULL;
+static IMP axs_origDockSession = NULL;
+
+static id axs_holdlaunch_sessionForContainerView_imp(id self, SEL _cmd, id container) {
+    id session = ((id(*)(id, SEL, id))axs_origSessionForContainerView)(self, _cmd, container);
+    axs_ring_noteContainerForSession(container, session);
+    return session;
+}
+
+static id axs_holdlaunch_sessionForBundle_imp(id self, SEL _cmd, id bundleIdentifier) {
+    id session = ((id(*)(id, SEL, id))axs_origSessionForBundle)(self, _cmd, bundleIdentifier);
+    axs_ring_setSessionBundle(session, bundleIdentifier);
+    return session;
+}
+
+static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, id session, BOOL animated) {
+    axs_ring_sessionClosed(session);
+    ((void(*)(id, SEL, id, BOOL))axs_origCloseSession)(self, _cmd, session, animated);
+}
+
+static id axs_holdlaunch_dockSession_imp(id self, SEL _cmd, id session, unsigned long fromCorner) {
+    axs_ring_sessionDocked(session);
+    return ((id(*)(id, SEL, id, unsigned long))axs_origDockSession)(self, _cmd, session, fromCorner);
+}
+
 static void axs_holdlaunch_installSpringBoardHooks(void) {
     if (axs_springboardHooksInstalled) return;
     axs_springboardHooksInstalled = YES;
@@ -154,9 +187,23 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger modeCount = axs_holdlaunch_hookSelector(selMode, (IMP)axs_holdlaunch_gestureMode_imp_a, &axs_origGestureMode);
     NSUInteger arcModeCount = axs_holdlaunch_hookSelector(selArcMode, (IMP)axs_holdlaunch_gestureMode_imp_b, &axs_origArcGestureMode);
 
-    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu",
+    // Ring engine feed hooks (all signature-safe: object args, object/void returns)
+    SEL selSessionForContainer = @selector(sc_sessionForContainerView:);
+    SEL selSessionForBundle = @selector(sc_sessionForBundleIdentifier:);
+    SEL selCloseSession = @selector(sc_closeSession:animated:);
+    SEL selDockSession = @selector(sc_dockSession:fromCorner:);
+
+    NSUInteger sessionForContainerCount = axs_holdlaunch_hookSelector(selSessionForContainer, (IMP)axs_holdlaunch_sessionForContainerView_imp, &axs_origSessionForContainerView);
+    NSUInteger sessionForBundleCount = axs_holdlaunch_hookSelector(selSessionForBundle, (IMP)axs_holdlaunch_sessionForBundle_imp, &axs_origSessionForBundle);
+    NSUInteger closeSessionCount = axs_holdlaunch_hookSelector(selCloseSession, (IMP)axs_holdlaunch_closeSession_imp, &axs_origCloseSession);
+    NSUInteger dockSessionCount = axs_holdlaunch_hookSelector(selDockSession, (IMP)axs_holdlaunch_dockSession_imp, &axs_origDockSession);
+
+    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu sessionForContainer=%lu sessionForBundle=%lu closeSession=%lu dockSession=%lu",
                        (unsigned long)setBundleCount,
-                       (unsigned long)modeCount, (unsigned long)arcModeCount);
+                       (unsigned long)modeCount, (unsigned long)arcModeCount,
+                       (unsigned long)sessionForContainerCount, (unsigned long)sessionForBundleCount,
+                       (unsigned long)closeSessionCount, (unsigned long)dockSessionCount);
+    axs_ring_engine_wake();
 }
 
 // ---------------------------------------------------------------------------
@@ -175,8 +222,8 @@ static IMP axs_origSetPrefValue = NULL;
 static IMP axs_origDidSelect = NULL;
 static BOOL axs_settingsInstalled = NO;
 
-static NSString * const AxsHoldLaunchKeyGlowFrameColor = @"GlowFrameColor";
-static NSString * const AxsHoldLaunchKeyGlowHaloColor = @"GlowHaloColor";
+static NSString * const AxsHoldLaunchKeyRingColor = @"splitWindowRingColor";
+static NSString * const AxsHoldLaunchKeyGlowColor = @"splitWindowGlowColor";
 
 static UIColor *axs_holdlaunch_hexToColor(NSString *hex, UIColor *fallback) {
     if (![hex isKindOfClass:[NSString class]] || hex.length == 0) return fallback;
@@ -217,6 +264,11 @@ static void axs_holdlaunch_presentColorPicker(id self, NSString *title, NSString
         ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setTitle:), title);
     }
     objc_setAssociatedObject(picker, @selector(axsGlowColorKey), key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Delegate: colorPickerControllerDidFinish: was added to the controller
+    // class in installSettingsHooks 閳?without this the picked color never saves.
+    if ([picker respondsToSelector:@selector(setDelegate:)]) {
+        ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setDelegate:), self);
+    }
     [self presentViewController:picker animated:YES completion:nil];
 }
 
@@ -268,12 +320,12 @@ static void axs_didSelectRow_imp(id self, SEL _cmd, id tableView, id indexPath) 
             PSSpecifier *spec = ((PSSpecifier *(*)(id, SEL, id))objc_msgSend)(self, @selector(specifierAtIndexPath:), indexPath);
             key = [spec propertyForKey:@"key"];
         }
-        if ([key isEqualToString:AxsHoldLaunchKeyGlowFrameColor]) {
-            axs_holdlaunch_presentColorPicker(self, @"光圈颜色", AxsHoldLaunchKeyGlowFrameColor);
+        if ([key isEqualToString:AxsHoldLaunchKeyRingColor]) {
+            axs_holdlaunch_presentColorPicker(self, @"閸忓婀€妫版粏澹?, AxsHoldLaunchKeyRingColor);
             return;
         }
-        if ([key isEqualToString:AxsHoldLaunchKeyGlowHaloColor]) {
-            axs_holdlaunch_presentColorPicker(self, @"光晕颜色", AxsHoldLaunchKeyGlowHaloColor);
+        if ([key isEqualToString:AxsHoldLaunchKeyGlowColor]) {
+            axs_holdlaunch_presentColorPicker(self, @"閸忓妾挎０婊嗗", AxsHoldLaunchKeyGlowColor);
             return;
         }
     } @catch (NSException *exception) {
@@ -282,16 +334,15 @@ static void axs_didSelectRow_imp(id self, SEL _cmd, id tableView, id indexPath) 
     ((void(*)(id, SEL, id, id))axs_origDidSelect)(self, _cmd, tableView, indexPath);
 }
 
-// 颜色行右侧的圆圈按钮: 点按弹取色器
-static void axs_holdlaunch_colorButtonTapped_imp(id self, SEL _cmd, id sender) {
+// 妫版粏澹婄悰灞藉礁娓氀呮畱閸﹀棗婀€閹稿鎸? 閻愯瀵滃鐟板絿閼规彃娅?static void axs_holdlaunch_colorButtonTapped_imp(id self, SEL _cmd, id sender) {
     int tag = 0;
     if ([sender respondsToSelector:@selector(tag)]) {
         tag = (int)((long(*)(id, SEL))objc_msgSend)(sender, @selector(tag));
     }
     if (tag == 1) {
-        axs_holdlaunch_presentColorPicker(self, @"光晕颜色", AxsHoldLaunchKeyGlowHaloColor);
+        axs_holdlaunch_presentColorPicker(self, @"閸忓妾挎０婊嗗", AxsHoldLaunchKeyGlowColor);
     } else {
-        axs_holdlaunch_presentColorPicker(self, @"光圈颜色", AxsHoldLaunchKeyGlowFrameColor);
+        axs_holdlaunch_presentColorPicker(self, @"閸忓婀€妫版粏澹?, AxsHoldLaunchKeyRingColor);
     }
 }
 
@@ -307,11 +358,11 @@ static id axs_cellForRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
         }
         NSString *colorKey = nil;
         int tag = 0;
-        if ([key isEqualToString:AxsHoldLaunchKeyGlowFrameColor]) { colorKey = key; tag = 0; }
-        if ([key isEqualToString:AxsHoldLaunchKeyGlowHaloColor]) { colorKey = key; tag = 1; }
+        if ([key isEqualToString:AxsHoldLaunchKeyRingColor]) { colorKey = key; tag = 0; }
+        if ([key isEqualToString:AxsHoldLaunchKeyGlowColor]) { colorKey = key; tag = 1; }
         if (colorKey == nil) return cell;
 
-        // 右侧当前颜色圆圈 (UIButton, 点击弹取色器)
+        // 閸欏厖鏅惰ぐ鎾冲妫版粏澹婇崷鍡楁箑 (UIButton, 閻愮懓鍤鐟板絿閼规彃娅?
         NSString *hex = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_valueForKey:colorKey defaultValue:nil];
         UIColor *color = axs_holdlaunch_hexToColor(hex, [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
         UIButton *dot = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -325,8 +376,7 @@ static id axs_cellForRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
         [dot addTarget:self action:@selector(axs_holdlaunch_colorButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
         cell.accessoryView = dot;
     } @catch (NSException *exception) {
-        // cell 装饰失败不影响原功能
-    }
+        // cell 鐟佸懘銈版径杈Е娑撳秴濂栭崫宥呭斧閸旂喕鍏?    }
     return cell;
 }
 
@@ -343,12 +393,12 @@ static NSArray *axs_holdlaunch_injectedSpecifiers_imp(id self, SEL _cmd) {
     SEL setSel = @selector(axs_holdlaunch_writeValue:forSpecifier:);
     SEL getSel = @selector(axs_holdlaunch_readValueForSpecifier:);
 
-    PSSpecifier *enabled = axs_holdlaunch_specifier(@"长按松手触发", self, setSel, getSel);
+    PSSpecifier *enabled = axs_holdlaunch_specifier(@"闂€鎸庡瘻閺夌偓澧滅憴锕€褰?, self, setSel, getSel);
     [enabled setProperty:AxsHoldLaunchKeyEnabled forKey:@"key"];
     [enabled setProperty:@"PSSwitchCell" forKey:@"cellClass"];
     [enabled setIdentifier:@"axsHoldLaunchEnabledSpecifier"];
 
-    PSSpecifier *threshold = axs_holdlaunch_specifier(@"触发时间（秒）", self, setSel, getSel);
+    PSSpecifier *threshold = axs_holdlaunch_specifier(@"鐟欙箑褰傞弮鍫曟？閿涘牏顫楅敍?, self, setSel, getSel);
     [threshold setProperty:AxsHoldLaunchKeyThreshold forKey:@"key"];
     [threshold setProperty:@"PSSliderCell" forKey:@"cellClass"];
     [threshold setProperty:@(0.2) forKey:@"min"];
@@ -356,7 +406,7 @@ static NSArray *axs_holdlaunch_injectedSpecifiers_imp(id self, SEL _cmd) {
     [threshold setProperty:@YES forKey:@"showValue"];
     [threshold setIdentifier:@"axsHoldLaunchThresholdSpecifier"];
 
-    PSSpecifier *reverse = axs_holdlaunch_specifier(@"反转长按动作", self, setSel, getSel);
+    PSSpecifier *reverse = axs_holdlaunch_specifier(@"閸欏秷娴嗛梹鎸庡瘻閸斻劋缍?, self, setSel, getSel);
     [reverse setProperty:AxsHoldLaunchKeyReverse forKey:@"key"];
     [reverse setProperty:@"PSSwitchCell" forKey:@"cellClass"];
     [reverse setIdentifier:@"axsHoldLaunchReverseSpecifier"];
@@ -405,7 +455,7 @@ static NSArray *axs_specifiers_imp(id self, SEL _cmd) {
         NSString *key = [(PSSpecifier *)specifiers[i] propertyForKey:@"key"];
         if ([key isEqualToString:@"splitSideGestureLaunchMode"]
             || [key isEqualToString:@"splitArcGestureLaunchMode"]) {
-            anchor = i; // keep the last match: the end of the "启动" group
+            anchor = i; // keep the last match: the end of the "閸氼垰濮? group
         }
     }
 
@@ -512,7 +562,7 @@ static void axs_holdlaunch_installSettingsHooks(void) {
 
 // ---------------------------------------------------------------------------
 
-void axs_glow_engine_start(void);
+void axs_ring_engine_wake(void);
 
 %group AxsHoldLaunchSpringBoardTrigger
 
@@ -524,7 +574,7 @@ void axs_glow_engine_start(void);
 - (void)applicationDidFinishLaunching:(id)application {
     axs_holdlaunch_log(@"springboard didFinishLaunching");
     axs_holdlaunch_installSpringBoardHooks();
-    axs_glow_engine_start();
+    axs_ring_engine_wake();
     %orig;
 }
 

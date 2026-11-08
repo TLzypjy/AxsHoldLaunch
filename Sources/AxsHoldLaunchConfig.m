@@ -3,11 +3,21 @@
 
 @interface AxsHoldLaunchConfig ()
 @property (atomic, copy) NSDictionary *snapshot;
+@property (atomic, copy) NSDictionary *theirSnapshot;   // com.susudear.screencoreprefs
 @property (nonatomic, strong) dispatch_queue_t reloadQueue;
 @end
 
 static void axs_holdlaunch_preferencesDidChange(CFNotificationCenterRef center, void *observer,
                                                 CFStringRef name, const void *object, CFDictionaryRef info) {
+    AxsHoldLaunchConfig *config = (__bridge AxsHoldLaunchConfig *)observer;
+    dispatch_async(config.reloadQueue, ^{
+        [config axs_holdlaunch_reload];
+    });
+}
+
+static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, void *observer,
+                                               CFStringRef name, const void *object, CFDictionaryRef info) {
+    // ScreenCore 自己的设置保存通知: 光圈设置跟它的域走
     AxsHoldLaunchConfig *config = (__bridge AxsHoldLaunchConfig *)observer;
     dispatch_async(config.reloadQueue, ^{
         [config axs_holdlaunch_reload];
@@ -34,14 +44,32 @@ static void axs_holdlaunch_preferencesDidChange(CFNotificationCenterRef center, 
             (__bridge const void *)self, axs_holdlaunch_preferencesDidChange,
             (__bridge CFStringRef)AxsHoldLaunchPreferencesChanged, NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
+        // ScreenCore 自己的设置保存通知: 光圈设置跟随它的域
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+            (__bridge const void *)self, axs_holdlaunch_theirPrefsDidChange,
+            CFSTR("com.susudear.screencoreprefs/saved"), NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
         // Close the window between the first read and observer registration.
         dispatch_async(_reloadQueue, ^{ [self axs_holdlaunch_reload]; });
     }
     return self;
 }
 
+- (NSDictionary *)axs_holdlaunch_theirSnapshot {
+    return self.theirSnapshot ?: @{};
+}
+
+- (id)axs_holdlaunch_theirValueForKey:(NSString *)key defaultValue:(id)defaultValue {
+    id value = [self axs_holdlaunch_theirSnapshot objectForKey:key];
+    return value ?: defaultValue;
+}
+
 - (void)axs_holdlaunch_reload {
     self.snapshot = axs_holdlaunch_readPreferences();
+    // ScreenCore 原装域: 直读它的 plist 文件 (PS 写入 + cfprefsd 落盘)
+    NSString *theirPath = axs_holdlaunch_theirPreferencesPath();
+    NSDictionary *their = theirPath.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:theirPath] : nil;
+    self.theirSnapshot = [their isKindOfClass:[NSDictionary class]] ? their : @{};
 }
 
 - (id)axs_holdlaunch_valueForKey:(NSString *)key defaultValue:(id)defaultValue {
@@ -66,34 +94,54 @@ static void axs_holdlaunch_preferencesDidChange(CFNotificationCenterRef center, 
     return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
 }
 
-- (BOOL)axs_holdlaunch_glowFrameEnabled {
-    id value = [self axs_holdlaunch_valueForKey:@"GlowFrameEnabled" defaultValue:@YES];
-    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : YES;
-}
+#pragma mark - ScreenCore 原装域 (光圈设置)
 
-- (BOOL)axs_holdlaunch_glowFrameCustom {
-    id value = [self axs_holdlaunch_valueForKey:@"GlowFrameCustom" defaultValue:@NO];
+- (BOOL)axs_holdlaunch_isTheirRingEnabled {
+    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowRingEnabled" defaultValue:@NO];
     return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
 }
 
-- (NSString *)axs_holdlaunch_glowFrameColor {
-    id value = [self axs_holdlaunch_valueForKey:@"GlowFrameColor" defaultValue:@"#34A1FF"];
+- (BOOL)axs_holdlaunch_isTheirMiniRingEnabled {
+    id value = [self axs_holdlaunch_theirValueForKey:@"splitMiniWindowRingEnabled" defaultValue:@NO];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
+}
+
+- (BOOL)axs_holdlaunch_isTheirRingCustomEnabled {
+    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowRingCustomEnabled" defaultValue:@NO];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
+}
+
+- (NSString *)axs_holdlaunch_isTheirRingColor {
+    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowRingColor" defaultValue:@"#34A1FF"];
     return [value isKindOfClass:[NSString class]] ? value : @"#34A1FF";
 }
 
-- (BOOL)axs_holdlaunch_glowHaloEnabled {
-    id value = [self axs_holdlaunch_valueForKey:@"GlowHaloEnabled" defaultValue:@YES];
-    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : YES;
-}
-
-- (BOOL)axs_holdlaunch_glowHaloCustom {
-    id value = [self axs_holdlaunch_valueForKey:@"GlowHaloCustom" defaultValue:@NO];
+- (BOOL)axs_holdlaunch_isTheirGlowEnabled {
+    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowGlowEnabled" defaultValue:@NO];
     return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
 }
 
-- (NSString *)axs_holdlaunch_glowHaloColor {
-    id value = [self axs_holdlaunch_valueForKey:@"GlowHaloColor" defaultValue:@"#FFFFFF"];
+- (BOOL)axs_holdlaunch_isTheirGlowCustomEnabled {
+    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowGlowCustomEnabled" defaultValue:@NO];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
+}
+
+- (NSString *)axs_holdlaunch_isTheirGlowColor {
+    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowGlowColor" defaultValue:@"#FFFFFF"];
     return [value isKindOfClass:[NSString class]] ? value : @"#FFFFFF";
+}
+
+- (NSArray *)axs_holdlaunch_ringExcludedApplications {
+    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowRingExcludedApplications" defaultValue:@[]];
+    return [value isKindOfClass:[NSArray class]] ? value : @[];
+}
+
+- (double)axs_holdlaunch_splitWindowCornerRadius {
+    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowCornerRadius" defaultValue:@47.0];
+    double v = [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : 47.0;
+    if (v < 0) v = 0;
+    if (v > 60) v = 60;
+    return v;
 }
 
 - (void)dealloc {
