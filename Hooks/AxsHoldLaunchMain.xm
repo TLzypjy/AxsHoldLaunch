@@ -178,18 +178,44 @@ static BOOL axs_settingsInstalled = NO;
 static NSString * const AxsHoldLaunchKeyGlowFrameColor = @"GlowFrameColor";
 static NSString * const AxsHoldLaunchKeyGlowHaloColor = @"GlowHaloColor";
 
+static UIColor *axs_holdlaunch_hexToColor(NSString *hex, UIColor *fallback) {
+    if (![hex isKindOfClass:[NSString class]] || hex.length == 0) return fallback;
+    NSString *h = [[hex stringByReplacingOccurrencesOfString:@"#" withString:@""] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (h.length != 6) return fallback;
+    unsigned int v = 0;
+    NSScanner *scanner = [NSScanner scannerWithString:h];
+    [scanner scanHexInt:&v];
+    return [UIColor colorWithRed:((v >> 16) & 0xFF) / 255.0
+                           green:((v >> 8) & 0xFF) / 255.0
+                            blue:(v & 0xFF) / 255.0
+                           alpha:1.0];
+}
+
+static NSString *axs_holdlaunch_colorToHex(UIColor *color) {
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (![color getRed:&r green:&g blue:&b alpha:&a]) return @"#FFFFFF";
+    return [NSString stringWithFormat:@"#%02X%02X%02X",
+            (int)round(r * 255), (int)round(g * 255), (int)round(b * 255)];
+}
+
 static void axs_holdlaunch_presentColorPicker(id self, NSString *title, NSString *key) {
     if (!objc_getClass("UIColorPickerViewController")) {
         axs_holdlaunch_log(@"UIColorPickerViewController unavailable");
         return;
     }
-    UIColorPickerViewController *picker = [[objc_getClass("UIColorPickerViewController") alloc] init];
-    if ([picker respondsToSelector:@selector(setSupportsAlpha:)]) picker.supportsAlpha = NO;
-    if ([picker respondsToSelector:@selector(setInitialColor:)])
-        picker.initialColor = axs_holdlaunch_hexToColor(
+    UIViewController *picker = [[objc_getClass("UIColorPickerViewController") alloc] init];
+    if ([picker respondsToSelector:@selector(setSupportsAlpha:)]) {
+        ((void(*)(id, SEL, BOOL))objc_msgSend)(picker, @selector(setSupportsAlpha:), NO);
+    }
+    if ([picker respondsToSelector:@selector(setInitialColor:)]) {
+        UIColor *initial = axs_holdlaunch_hexToColor(
             [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_valueForKey:key defaultValue:nil],
             [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
-    if ([picker respondsToSelector:@selector(setTitle:)]) picker.title = title;
+        ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setInitialColor:), initial);
+    }
+    if ([picker respondsToSelector:@selector(setTitle:)]) {
+        ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setTitle:), title);
+    }
     objc_setAssociatedObject(picker, @selector(axsGlowColorKey), key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [self presentViewController:picker animated:YES completion:nil];
 }
@@ -216,19 +242,6 @@ static double axs_holdlaunch_quantizeThreshold(double value) {
     if (v < 0.2) v = 0.2;
     if (v > 5.0) v = 5.0;
     return v;
-}
-
-static UIColor *axs_holdlaunch_hexToColor(NSString *hex, UIColor *fallback) {
-    if (![hex isKindOfClass:[NSString class]] || hex.length == 0) return fallback;
-    NSString *h = [[hex stringByReplacingOccurrencesOfString:@"#" withString:@""] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    if (h.length != 6) return fallback;
-    unsigned int v = 0;
-    NSScanner *scanner = [NSScanner scannerWithString:h];
-    [scanner scanHexInt:&v];
-    return [UIColor colorWithRed:((v >> 16) & 0xFF) / 255.0
-                           green:((v >> 8) & 0xFF) / 255.0
-                            blue:(v & 0xFF) / 255.0
-                           alpha:1.0];
 }
 
 static NSString *axs_holdlaunch_colorToHex(UIColor *color) {
