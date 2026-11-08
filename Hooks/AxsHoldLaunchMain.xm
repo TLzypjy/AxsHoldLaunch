@@ -177,15 +177,6 @@ static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) 
     return ((id(*)(id, SEL, id))axs_origSessionFor)(self, _cmd, bundleIdentifier);
 }
 
-static void axs_holdlaunch_closeSessionForBundle(NSString *bundleIdentifier, NSString *reason) {
-    id manager = axs_sessionManager;
-    if (manager == nil || bundleIdentifier.length == 0) return;
-    id session = ((id(*)(id, SEL, id))objc_msgSend)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
-    if (session == nil) return;
-    ((void(*)(id, SEL, id, BOOL))objc_msgSend)(manager, @selector(sc_closeSession:animated:), session, YES);
-    axs_holdlaunch_log(@"auto-closed floating window bundle=%@ reason=%@", bundleIdentifier, reason);
-}
-
 static BOOL axs_springboardHooksInstalled = NO;
 
 // scanAllClasses: some ScreenCore selectors are dispatched dynamically and
