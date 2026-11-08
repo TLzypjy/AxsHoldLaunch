@@ -461,7 +461,7 @@ static void axs_ring_tick(void) {
 
             // style signature: rebuild only when a style parameter changed
             NSString *styleSig = [NSString stringWithFormat:
-                @"%@|%.1f|f=%.2f,%.2f,%.1f,%d,%@,%d|g=%d,%.1f,%.1f,%.1f|i=%d,%d,%.1f,%@,%d|b=%@",
+                @"%@|%.1f|f=%.2f,%.2f,%d,%@,%d|g=%d,%.1f,%.1f,%.1f|i=%d,%d,%.1f,%@,%d|b=%@",
                 docked ? @"d" : @"f",
                 axs_ring_radius(view, docked, config),
                 [config axs_holdlaunch_ringFrameWidth],
