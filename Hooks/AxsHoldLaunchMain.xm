@@ -53,12 +53,15 @@ static void axs_holdlaunch_log(NSString *format, ...) {
     }
 }
 
-// Ring engine C API (defined in AXSRingEngine.xm)
+// Ring engine C API (defined in AXSRingEngine.xm); .xm compiles as ObjC++,
+// so pin C linkage to match the engine's extern "C" definitions.
+extern "C" {
 void axs_ring_setSessionBundle(id session, NSString *bundle);
 void axs_ring_noteContainerForSession(id container, id session);
 void axs_ring_sessionClosed(id session);
 void axs_ring_sessionDocked(id session);
 void axs_ring_engine_wake(void);
+}
 
 // Main-thread gesture state; the hooks all run on the main thread.
 static NSTimeInterval axs_arrivalTime = 0;

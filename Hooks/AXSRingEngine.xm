@@ -74,6 +74,9 @@ static NSString *axs_ring_keyFor(id object) {
 }
 
 // --- C API fed by AxsHoldLaunchMain.xm hooks ---
+// .xm compiles as ObjC++; keep C linkage so Config.m (plain ObjC) can call in.
+
+extern "C" {
 
 void axs_ring_engine_wake(void);
 
@@ -149,6 +152,8 @@ void axs_ring_engine_wake(void) {
         axs_ring_engine_log(@"ring engine display link started");
     });
 }
+
+} // extern "C"
 
 // --- internals ---
 
