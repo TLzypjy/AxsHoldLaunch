@@ -70,6 +70,20 @@ static IMP axs_origGestureMode = NULL;
 static IMP axs_origArcGestureMode = NULL;
 static IMP axs_origSessionFor = NULL;
 
+// Captured from sc_sessionForBundleIdentifier: so the auto-close can resolve
+// sessions without knowing the manager's class beyond its selector surface.
+static __weak id axs_sessionManager = nil;
+static BOOL axs_sessionManagerLogged = NO;
+
+static void axs_holdlaunch_closeSessionForBundle(NSString *bundleIdentifier, NSString *reason) {
+    id manager = axs_sessionManager;
+    if (manager == nil || bundleIdentifier.length == 0) return;
+    id session = ((id(*)(id, SEL, id))objc_msgSend)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
+    if (session == nil) return;
+    ((void(*)(id, SEL, id, BOOL))objc_msgSend)(manager, @selector(sc_closeSession:animated:), session, YES);
+    axs_holdlaunch_log(@"auto-closed floating window bundle=%@ reason=%@", bundleIdentifier, reason);
+}
+
 static void axs_holdlaunch_recordArrival(NSString *bundle) {
     if (![bundle isKindOfClass:[NSString class]] || bundle.length == 0) return;
     if ([bundle isEqualToString:axs_lastSeenBundle]) return;
@@ -151,9 +165,6 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
 // DIFFERENT app A (payment completion callback, conversion finished), close
 // the floating session of B. Uses only signature-safe hooks.
 // ---------------------------------------------------------------------------
-
-static __weak id axs_sessionManager = nil;
-static BOOL axs_sessionManagerLogged = NO;
 
 static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) {
     if (axs_sessionManager == nil) {
