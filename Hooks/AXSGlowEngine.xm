@@ -102,7 +102,6 @@ static CALayer *axs_glow_buildRing(CGRect bounds, CGFloat radius, CGFloat outerG
 // 重建 (颜色/开关/尺寸变化时才调用)
 static void axs_glow_rebuild(UIView *hostView, AxsHoldLaunchConfig *config) {
     NSString *key = [NSString stringWithFormat:@"%p", hostView];
-    CGRect bounds = hostView.bounds;
     CGFloat radius = hostView.layer.cornerRadius;
     if (radius < 1) radius = 47.0;
 
