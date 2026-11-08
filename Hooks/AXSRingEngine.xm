@@ -176,7 +176,7 @@ void axs_ring_noteContainerForSession(id container, id session) {
         m[@"bundle"] = bundle;
         m[@"excluded"] = nil; // re-evaluate exclusion for the new app
     }
-    UIWindow *host = container.window ?: [axs_hosts objectForKey:key];
+    UIWindow *host = [(UIView *)container window] ?: [axs_hosts objectForKey:key];
     if (host != nil) [axs_hosts setObject:host forKey:key];
     axs_ring_engine_log(@"ring container noted: session=%p host=%p bounds=%@",
                         session, host, NSStringFromCGRect([(UIView *)container bounds]));
@@ -246,7 +246,8 @@ void axs_ring_sessionDocked(id session) {
     if ([item isKindOfClass:[UIView class]]) {
         NSString *key = [NSString stringWithFormat:@"d%@", axs_ring_keyFor(item)];
         [axs_views setObject:item forKey:key];
-        if (item.window != nil) [axs_hosts setObject:item.window forKey:key];
+        UIWindow *itemWindow = [(UIView *)item window];
+        if (itemWindow != nil) [axs_hosts setObject:itemWindow forKey:key];
         NSMutableDictionary *m = axs_meta[key];
         if (m == nil) {
             m = [NSMutableDictionary new];
