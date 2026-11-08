@@ -64,7 +64,7 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
 }
 
 - (id)axs_holdlaunch_theirValueForKey:(NSString *)key defaultValue:(id)defaultValue {
-    id value = [self axs_holdlaunch_theirSnapshot objectForKey:key];
+    id value = [[self axs_holdlaunch_theirSnapshot] objectForKey:key];
     return value ?: defaultValue;
 }
 
