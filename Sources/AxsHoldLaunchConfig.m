@@ -1,9 +1,10 @@
 #import "AxsHoldLaunchConfig.h"
 #import "AxsHoldLaunchPreferences.h"
 
-// defined in AXSRingEngine.xm; clears the per-container exclusion cache so a
-// changed exclusion list takes effect without recreating floating windows
+// defined in AXSRingEngine.xm; clears ring caches when their prefs change so
+// style/exclusion updates take effect without recreating floating windows
 extern void axs_ring_configChanged(void);
+extern void axs_ring_engine_wake(void);
 
 @interface AxsHoldLaunchConfig ()
 @property (atomic, copy) NSDictionary *snapshot;
@@ -69,15 +70,15 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
 }
 
 - (void)axs_holdlaunch_reload {
-    NSArray *oldExclusions = [self axs_holdlaunch_ringExcludedApplications];
+    NSDictionary *oldTheir = [self axs_holdlaunch_theirSnapshot];
     self.snapshot = axs_holdlaunch_readPreferences();
     // ScreenCore 原装域: 直读它的 plist 文件 (PS 写入 + cfprefsd 落盘)
     NSString *theirPath = axs_holdlaunch_theirPreferencesPath();
     NSDictionary *their = theirPath.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:theirPath] : nil;
     self.theirSnapshot = [their isKindOfClass:[NSDictionary class]] ? their : @{};
-    NSArray *newExclusions = [self axs_holdlaunch_ringExcludedApplications];
-    if (![oldExclusions isEqualToArray:newExclusions]) {
+    if (![oldTheir isEqualToDictionary:[self axs_holdlaunch_theirSnapshot]]) {
         axs_ring_configChanged();
+        axs_ring_engine_wake();
     }
 }
 
@@ -103,41 +104,35 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
     return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
 }
 
-#pragma mark - ScreenCore 原装域 (光圈设置)
+#pragma mark - 原装域读取工具
+
+static double axs_theirDouble(AxsHoldLaunchConfig *config, NSString *key,
+                              double fallback, double lo, double hi) {
+    id value = [config axs_holdlaunch_theirValueForKey:key defaultValue:@(fallback)];
+    double v = [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : fallback;
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return v;
+}
+
+static BOOL axs_theirBool(AxsHoldLaunchConfig *config, NSString *key, BOOL fallback) {
+    id value = [config axs_holdlaunch_theirValueForKey:key defaultValue:@(fallback)];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : fallback;
+}
+
+static NSString *axs_theirString(AxsHoldLaunchConfig *config, NSString *key, NSString *fallback) {
+    id value = [config axs_holdlaunch_theirValueForKey:key defaultValue:fallback];
+    return [value isKindOfClass:[NSString class]] ? value : fallback;
+}
+
+#pragma mark - 应用组
 
 - (BOOL)axs_holdlaunch_isTheirRingEnabled {
-    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowRingEnabled" defaultValue:@NO];
-    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
+    return axs_theirBool(self, @"splitWindowRingEnabled", YES);
 }
 
 - (BOOL)axs_holdlaunch_isTheirMiniRingEnabled {
-    id value = [self axs_holdlaunch_theirValueForKey:@"splitMiniWindowRingEnabled" defaultValue:@NO];
-    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
-}
-
-- (BOOL)axs_holdlaunch_isTheirRingCustomEnabled {
-    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowRingCustomEnabled" defaultValue:@NO];
-    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
-}
-
-- (NSString *)axs_holdlaunch_isTheirRingColor {
-    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowRingColor" defaultValue:@"#34A1FF"];
-    return [value isKindOfClass:[NSString class]] ? value : @"#34A1FF";
-}
-
-- (BOOL)axs_holdlaunch_isTheirGlowEnabled {
-    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowGlowEnabled" defaultValue:@NO];
-    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
-}
-
-- (BOOL)axs_holdlaunch_isTheirGlowCustomEnabled {
-    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowGlowCustomEnabled" defaultValue:@NO];
-    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
-}
-
-- (NSString *)axs_holdlaunch_isTheirGlowColor {
-    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowGlowColor" defaultValue:@"#FFFFFF"];
-    return [value isKindOfClass:[NSString class]] ? value : @"#FFFFFF";
+    return axs_theirBool(self, @"splitMiniWindowRingEnabled", NO);
 }
 
 - (NSArray *)axs_holdlaunch_ringExcludedApplications {
@@ -156,11 +151,77 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
 }
 
 - (double)axs_holdlaunch_splitWindowCornerRadius {
-    id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowCornerRadius" defaultValue:@47.0];
-    double v = [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : 47.0;
-    if (v < 0) v = 0;
-    if (v > 60) v = 60;
-    return v;
+    return axs_theirDouble(self, @"splitWindowCornerRadius", 47.0, 0, 60);
+}
+
+#pragma mark - 外框组
+
+- (BOOL)axs_holdlaunch_ringFrameEnabled {
+    return axs_theirBool(self, @"splitWindowRingFrameEnabled", YES);
+}
+
+- (double)axs_holdlaunch_ringFrameWidth {
+    return axs_theirDouble(self, @"splitWindowRingFrameWidth", 2.0, 0, 30);
+}
+
+- (double)axs_holdlaunch_ringFrameAlpha {
+    return axs_theirDouble(self, @"splitWindowRingFrameAlpha", 0.5, 0, 1);
+}
+
+- (BOOL)axs_holdlaunch_ringFrameCustomEnabled {
+    return axs_theirBool(self, @"splitWindowRingFrameCustomEnabled", NO);
+}
+
+- (NSString *)axs_holdlaunch_ringFrameColor {
+    return axs_theirString(self, @"splitWindowRingFrameColor", @"#34A1FF");
+}
+
+- (BOOL)axs_holdlaunch_ringFrameRandomColor {
+    return axs_theirBool(self, @"splitWindowRingFrameRandomColor", NO);
+}
+
+#pragma mark - 光晕组
+
+- (BOOL)axs_holdlaunch_ringGlowEnabled {
+    return axs_theirBool(self, @"splitWindowGlowEnabled", YES);
+}
+
+- (BOOL)axs_holdlaunch_ringGlowCustomEnabled {
+    return axs_theirBool(self, @"splitWindowGlowCustomEnabled", NO);
+}
+
+- (NSString *)axs_holdlaunch_ringGlowColor {
+    return axs_theirString(self, @"splitWindowGlowColor", @"#FFFFFF");
+}
+
+- (double)axs_holdlaunch_ringGlowRange {
+    return axs_theirDouble(self, @"splitWindowGlowRange", 6.0, 0, 50);
+}
+
+- (double)axs_holdlaunch_ringGlowOffsetY {
+    return axs_theirDouble(self, @"splitWindowGlowOffsetY", 0.0, -50, 50);
+}
+
+- (double)axs_holdlaunch_ringGlowOffsetX {
+    return axs_theirDouble(self, @"splitWindowGlowOffsetX", 0.0, -50, 50);
+}
+
+#pragma mark - 内圈组
+
+- (BOOL)axs_holdlaunch_ringInnerEnabled {
+    return axs_theirBool(self, @"splitWindowRingInnerEnabled", NO);
+}
+
+- (double)axs_holdlaunch_ringInnerWidth {
+    return axs_theirDouble(self, @"splitWindowRingInnerWidth", 2.0, 1, 30);
+}
+
+- (NSString *)axs_holdlaunch_ringInnerColor {
+    return axs_theirString(self, @"splitWindowRingInnerColor", @"#CBD0FF");
+}
+
+- (BOOL)axs_holdlaunch_ringInnerRandomColor {
+    return axs_theirBool(self, @"splitWindowRingInnerRandomColor", NO);
 }
 
 - (void)dealloc {

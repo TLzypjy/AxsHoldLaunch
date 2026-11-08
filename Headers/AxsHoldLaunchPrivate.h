@@ -17,11 +17,7 @@ void MSHookMessageEx(Class _class, SEL message, IMP hook, IMP *old);
 
 // ScreenCore hook targets (classes are discovered at runtime in SpringBoard;
 // only the selectors are known statically from the unstripped binary).
-#define AxsHoldLaunchSelUpdateSelection     @"sc_updateSelectionAtPoint:"
 #define AxsHoldLaunchSelSetSelectedBundle   @"setSelectedBundleIdentifier:"
-#define AxsHoldLaunchSelHandleSelected      @"sc_handleSelectedBundleIdentifier:sourceFrame:"
-#define AxsHoldLaunchSelOpenTarget          @"sc_openTargetIdentifier:transitionContext:presentationSourceRect:gestureProfile:launchFullscreen:"
-#define AxsHoldLaunchSelFinishTracking      @"sc_finishTracking"
 
 // Preferences framework (Settings process only). Declaring the interface is
 // safe; the class must only ever be resolved at runtime (objc_getClass), never
@@ -35,4 +31,9 @@ void MSHookMessageEx(Class _class, SEL message, IMP hook, IMP *old);
 @end
 
 @interface PSListController : UIViewController
+- (id)readPreferenceValue:(PSSpecifier *)specifier;
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier;
+- (PSSpecifier *)specifierAtIndexPath:(id)indexPath;
+- (void)reloadSpecifiers;
+- (NSBundle *)bundle;
 @end
