@@ -78,9 +78,13 @@ static BOOL axs_sessionManagerLogged = NO;
 static void axs_holdlaunch_closeSessionForBundle(NSString *bundleIdentifier, NSString *reason) {
     id manager = axs_sessionManager;
     if (manager == nil || bundleIdentifier.length == 0) return;
-    id session = ((id(*)(id, SEL, id))objc_msgSend)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
+    // Resolve through the UNGHOOKED original IMP: calling the hooked selector
+    // here would re-enter our own sessionFor hook (infinite recursion).
+    id session = ((id(*)(id, SEL, id))axs_origSessionFor)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
     if (session == nil) return;
+    axs_sessionHookDepth++;
     ((void(*)(id, SEL, id, BOOL))objc_msgSend)(manager, @selector(sc_closeSession:animated:), session, YES);
+    axs_sessionHookDepth--;
     axs_holdlaunch_log(@"auto-closed floating window bundle=%@ reason=%@", bundleIdentifier, reason);
 }
 
@@ -97,8 +101,10 @@ static void axs_holdlaunch_dockSessionForBundle(NSString *bundleIdentifier, NSSt
         axs_holdlaunch_closeSessionForBundle(bundleIdentifier, reason);
         return;
     }
-    id session = ((id(*)(id, SEL, id))objc_msgSend)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
+    // UNGHOOKED original IMP for session resolution (no hook re-entry).
+    id session = ((id(*)(id, SEL, id))axs_origSessionFor)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
     if (session == nil) return;
+    axs_sessionHookDepth++;
     NSString *encoding = [NSString stringWithUTF8String:method_getTypeEncoding(dockMethod)];
     // enc starts with "@@:" (return, self, cmd); extra argument chars follow.
     NSUInteger extra = encoding.length > 3 ? encoding.length - 3 : 0;
@@ -113,15 +119,18 @@ static void axs_holdlaunch_dockSessionForBundle(NSString *bundleIdentifier, NSSt
         } else if (arg == 'q' || arg == 'l' || arg == 'i' || arg == 'I' || arg == 'Q' || arg == 'L' || arg == 's' || arg == 'S') {
             ((void(*)(id, SEL, id, long))objc_msgSend)(manager, selDock, session, 0);
         } else {
+            axs_sessionHookDepth--;
             axs_holdlaunch_log(@"dock encoding %@ unsupported, closing %@ instead", encoding, bundleIdentifier);
             axs_holdlaunch_closeSessionForBundle(bundleIdentifier, reason);
             return;
         }
     } else {
+        axs_sessionHookDepth--;
         axs_holdlaunch_log(@"dock encoding %@ unsupported, closing %@ instead", encoding, bundleIdentifier);
         axs_holdlaunch_closeSessionForBundle(bundleIdentifier, reason);
         return;
     }
+    axs_sessionHookDepth--;
     axs_holdlaunch_log(@"docked floating window bundle=%@ reason=%@", bundleIdentifier, reason);
 }
 
@@ -193,7 +202,16 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
 // the floating session of B. Uses only signature-safe hooks.
 // ---------------------------------------------------------------------------
 
+static int axs_sessionHookDepth = 0;  // re-entrancy guard: while our close/dock
+                                      // helpers run, ScreenCore's own internals may
+                                      // query sessions again - those calls must
+                                      // pass straight through the original IMP.
+
 static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) {
+    if (axs_sessionHookDepth > 0) {
+        // Called from our own close/dock helpers: plain passthrough.
+        return ((id(*)(id, SEL, id))axs_origSessionFor)(self, _cmd, bundleIdentifier);
+    }
     if (axs_sessionManager == nil) {
         axs_sessionManager = self;
         if (!axs_sessionManagerLogged) {
@@ -217,6 +235,7 @@ static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) 
             && !userOpen
             && previous.length > 0
             && ![bundleIdentifier isEqualToString:previous]) {
+            axs_sessionHookDepth++;
             if ([config axs_holdlaunch_isTheirSingleWindowEnabled]) {
                 axs_holdlaunch_dockSessionForBundle(previous,
                     [NSString stringWithFormat:@"jumped-to:%@", bundleIdentifier]);
@@ -224,6 +243,7 @@ static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) 
                 axs_holdlaunch_closeSessionForBundle(previous,
                     [NSString stringWithFormat:@"jumped-to:%@", bundleIdentifier]);
             }
+            axs_sessionHookDepth--;
         }
         axs_activeFloatingBundle = bundleIdentifier;
     }
