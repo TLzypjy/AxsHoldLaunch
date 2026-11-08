@@ -169,7 +169,7 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
 static void *axs_holdlaunch_sessionForContainerView_imp(id self, SEL _cmd, void *container) {
     void *session = ((void *(*)(id, SEL, void *))axs_origSessionForContainerView)(self, _cmd, container);
     if ((axs_encSessionForContainer & 1) && (axs_encSessionForContainer & 4)) {
-        axs_ring_noteContainerForSession((__bridge id)container, (__bridge id)session);
+        axs_ring_noteContainerForSession(container, session);
     }
     return session;
 }
@@ -177,14 +177,14 @@ static void *axs_holdlaunch_sessionForContainerView_imp(id self, SEL _cmd, void 
 static void *axs_holdlaunch_sessionForBundle_imp(id self, SEL _cmd, void *bundleIdentifier) {
     void *session = ((void *(*)(id, SEL, void *))axs_origSessionForBundle)(self, _cmd, bundleIdentifier);
     if ((axs_encSessionForBundle & 1) && (axs_encSessionForBundle & 4)) {
-        axs_ring_setSessionBundle((__bridge id)session, (__bridge id)bundleIdentifier);
+        axs_ring_setSessionBundle(session, bundleIdentifier);
     }
     return session;
 }
 
 static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, void *session, void *animated) {
     if (axs_encCloseSession & 1) {
-        axs_ring_sessionClosed((__bridge id)session);
+        axs_ring_sessionClosed(session);
     }
     ((void(*)(id, SEL, void *, void *))axs_origCloseSession)(self, _cmd, session, animated);
 }
@@ -204,7 +204,7 @@ static void *axs_holdlaunch_dockSession_imp(id self, SEL _cmd, void *session, vo
         if (axs_dockHookedClasses[i] == cls) { orig = axs_dockOrigImps[i]; break; }
     }
     if (axs_encDockSession & 1) {
-        axs_ring_sessionDocked((__bridge id)session);
+        axs_ring_sessionDocked(session);
     }
     if (orig != NULL) {
         return ((void *(*)(id, SEL, void *, void *))orig)(self, _cmd, session, fromCorner);
