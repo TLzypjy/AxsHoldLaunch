@@ -36,12 +36,6 @@ static NSArray<UIColor *> *axs_glow_rainbow(void) {
               [UIColor purpleColor], [UIColor redColor] ];
 }
 
-static BOOL axs_glow_isRealAppBundle(NSString *bundle) {
-    return [bundle isKindOfClass:[NSString class]]
-        && bundle.length > 0
-        && ![bundle hasPrefix:@"system-tool:"];
-}
-
 // 找到浮窗里真正带圆角的内容视图 (类名 SC 前缀 + 圆角 >= 16 + 尺寸合理)
 static UIView *axs_glow_findRoundedView(UIView *root, int depth) {
     if (depth > 14) return nil;
