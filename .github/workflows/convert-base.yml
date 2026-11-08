@@ -16,7 +16,7 @@ jobs:
           brew install xz >/dev/null 2>&1 || true
           curl -sL -o base.deb.b64 "https://gist.githubusercontent.com/TLzypjy/168146ef939bf78b5453016b9ccb7054/raw/base.deb.b64"
           ls -la base.deb.b64
-          base64 -d base.deb.b64 > base.deb
+          base64 -D -i base.deb.b64 -o base.deb
           ls -la base.deb
           mkdir ex
           tar -xf base.deb -C ex control.tar.gz data.tar.lzma
