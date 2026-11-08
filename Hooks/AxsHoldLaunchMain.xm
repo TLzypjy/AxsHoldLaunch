@@ -62,8 +62,7 @@ static void axs_holdlaunch_log(NSString *format, ...) {
 static NSTimeInterval axs_arrivalTime = 0;        // when the current icon became selected
 static NSString *axs_arrivalBundle = nil;         // bundle id selected at axs_arrivalTime
 static NSString *axs_lastSeenBundle = nil;
-static NSString *axs_prevRealBundle = nil;        // previous real-app activation (auto-close)
-static NSTimeInterval axs_prevRealTime = 0;
+static NSString *axs_lastARCBundle = nil;         // last bundle opened through a user gesture
 
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origGestureMode = NULL;
@@ -84,6 +83,12 @@ static void axs_holdlaunch_closeSessionForBundle(NSString *bundleIdentifier, NSS
     axs_holdlaunch_log(@"auto-closed floating window bundle=%@ reason=%@", bundleIdentifier, reason);
 }
 
+static BOOL axs_holdlaunch_isRealAppBundle(NSString *bundle) {
+    return [bundle isKindOfClass:[NSString class]]
+        && bundle.length > 0
+        && ![bundle hasPrefix:@"system-tool:"];
+}
+
 static void axs_holdlaunch_recordArrival(NSString *bundle) {
     if (![bundle isKindOfClass:[NSString class]] || bundle.length == 0) return;
     if ([bundle isEqualToString:axs_lastSeenBundle]) return;
@@ -95,34 +100,11 @@ static void axs_holdlaunch_recordArrival(NSString *bundle) {
 static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     ((void(*)(id, SEL, id))axs_origSetSelectedBundle)(self, _cmd, bundle);
     axs_holdlaunch_recordArrival(bundle);
-    if (![bundle isKindOfClass:[NSString class]]) return;
-
-    // ---- callback auto-close (repairs ScreenCore's own "返回原应用时关闭浮窗") ----
-    // When a new app window activates, close the previous app's floating
-    // session if it was activated 2..180s ago. This covers the jump flows
-    // ScreenCore's built-in close misses (payment callback, Sileo converter):
-    //   sileo -> converter : sileo's floating window is closed (suspended)
-    //   converter -> sileo : the converter window is closed
-    //   douyin -> wechat (payment) -> douyin : wechat window is closed
-    // system-tool:* entries are menu items, not app windows - skip them.
-    if (![bundle hasPrefix:@"system-tool:"]) {
-        NSString *previous = axs_prevRealBundle;
-        AxsHoldLaunchConfig *config = [AxsHoldLaunchConfig axs_holdlaunch_shared];
-        BOOL gated = [config axs_holdlaunch_isTheirCallbackCloseEnabled]
-                  || [config axs_holdlaunch_isTheirSingleWindowEnabled];
-        if (previous.length > 0
-            && ![bundle isEqualToString:previous]
-            && gated) {
-            NSTimeInterval gap = axs_holdlaunch_now() - axs_prevRealTime;
-            if (gap >= 2.0 && gap <= 180.0) {
-                axs_holdlaunch_closeSessionForBundle(previous,
-                    [NSString stringWithFormat:@"replaced-by:%@", bundle]);
-            }
-        }
-        axs_prevRealBundle = bundle;
-        axs_prevRealTime = axs_holdlaunch_now();
+    // A user-gesture open updates the expected bundle, so the sessionFor hook
+    // can tell user opens (matching) from programmatic jumps (mismatched).
+    if (axs_holdlaunch_isRealAppBundle(bundle)) {
+        axs_lastARCBundle = bundle;
     }
-
     if (axs_arrivalTime > 0 && [bundle isEqualToString:axs_arrivalBundle]) {
         axs_holdlaunch_log(@"arrival(set) bundle=%@", bundle);
     }
@@ -177,8 +159,24 @@ static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) 
             axs_holdlaunch_log(@"session manager captured: %@", NSStringFromClass([self class]));
         }
     }
-    if ([bundleIdentifier isKindOfClass:[NSString class]]) {
-        axs_holdlaunch_log(@"sessionFor bundle=%@", bundleIdentifier);
+    if (axs_holdlaunch_isRealAppBundle(bundleIdentifier)) {
+        // Jump/callback flows never fire setSelectedBundleIdentifier:, while
+        // user-gesture opens always do. A session lookup for an unexpected
+        // bundle therefore means a programmatic jump: repair ScreenCore's
+        // callback close by closing the previously user-opened floating
+        // window (single-window demote / payment-callback close).
+        BOOL gated = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isTheirCallbackCloseEnabled]
+                  || [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isTheirSingleWindowEnabled];
+        if (gated
+            && axs_lastARCBundle.length > 0
+            && ![bundleIdentifier isEqualToString:axs_lastARCBundle]) {
+            axs_holdlaunch_log(@"jump detected: %@ (expected %@)", bundleIdentifier, axs_lastARCBundle);
+            axs_holdlaunch_closeSessionForBundle(axs_lastARCBundle,
+                [NSString stringWithFormat:@"jumped-to:%@", bundleIdentifier]);
+        }
+        if (gated) {
+            axs_lastARCBundle = bundleIdentifier;
+        }
     }
     return ((id(*)(id, SEL, id))axs_origSessionFor)(self, _cmd, bundleIdentifier);
 }
