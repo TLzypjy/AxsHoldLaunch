@@ -16,6 +16,11 @@ static NSTimer *axs_glowTimer = nil;
 static NSMutableDictionary<NSString *, NSMutableArray<CALayer *> *> *axs_glowLayers = nil;
 static NSMutableDictionary<NSString *, NSString *> *axs_glowSignature = nil;
 
+@interface AXSGlowEngineTarget : NSObject
++ (instancetype)shared;
+- (void)axsGlowTick;
+@end
+
 static UIColor *axs_glow_parseHex(NSString *hex, UIColor *fallback) {
     if (![hex isKindOfClass:[NSString class]] || hex.length == 0) return fallback;
     NSString *h = [[hex stringByReplacingOccurrencesOfString:@"#" withString:@""] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
@@ -189,11 +194,6 @@ static void axs_glow_start(void) {
         [[NSRunLoop mainRunLoop] addTimer:axs_glowTimer forMode:NSRunLoopCommonModes];
     });
 }
-
-@interface AXSGlowEngineTarget : NSObject
-+ (instancetype)shared;
-- (void)axsGlowTick;
-@end
 
 @implementation AXSGlowEngineTarget
 + (instancetype)shared {
