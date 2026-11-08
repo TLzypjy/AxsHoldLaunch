@@ -282,6 +282,54 @@ static void axs_didSelectRow_imp(id self, SEL _cmd, id tableView, id indexPath) 
     ((void(*)(id, SEL, id, id))axs_origDidSelect)(self, _cmd, tableView, indexPath);
 }
 
+// 颜色行右侧的圆圈按钮: 点按弹取色器
+static void axs_holdlaunch_colorButtonTapped_imp(id self, SEL _cmd, id sender) {
+    int tag = 0;
+    if ([sender respondsToSelector:@selector(tag)]) {
+        tag = (int)((long(*)(id, SEL))objc_msgSend)(sender, @selector(tag));
+    }
+    if (tag == 1) {
+        axs_holdlaunch_presentColorPicker(self, @"光晕颜色", AxsHoldLaunchKeyGlowHaloColor);
+    } else {
+        axs_holdlaunch_presentColorPicker(self, @"光圈颜色", AxsHoldLaunchKeyGlowFrameColor);
+    }
+}
+
+static IMP axs_origCellForRow = NULL;
+
+static id axs_cellForRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
+    id cell = ((id(*)(id, SEL, id, id))axs_origCellForRow)(self, _cmd, tableView, indexPath);
+    @try {
+        NSString *key = nil;
+        if ([self respondsToSelector:@selector(specifierAtIndexPath:)]) {
+            PSSpecifier *spec = ((PSSpecifier *(*)(id, SEL, id))objc_msgSend)(self, @selector(specifierAtIndexPath:), indexPath);
+            key = [spec propertyForKey:@"key"];
+        }
+        NSString *colorKey = nil;
+        int tag = 0;
+        if ([key isEqualToString:AxsHoldLaunchKeyGlowFrameColor]) { colorKey = key; tag = 0; }
+        if ([key isEqualToString:AxsHoldLaunchKeyGlowHaloColor]) { colorKey = key; tag = 1; }
+        if (colorKey == nil) return cell;
+
+        // 右侧当前颜色圆圈 (UIButton, 点击弹取色器)
+        NSString *hex = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_valueForKey:colorKey defaultValue:nil];
+        UIColor *color = axs_holdlaunch_hexToColor(hex, [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
+        UIButton *dot = [UIButton buttonWithType:UIButtonTypeCustom];
+        dot.frame = CGRectMake(0, 0, 28, 28);
+        dot.backgroundColor = color;
+        dot.layer.cornerRadius = 14;
+        dot.layer.borderWidth = 1.5;
+        dot.layer.borderColor = [UIColor colorWithWhite:0.75 alpha:1.0].CGColor;
+        dot.tag = tag;
+        dot.userInteractionEnabled = YES;
+        [dot addTarget:self action:@selector(axs_holdlaunch_colorButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+        cell.accessoryView = dot;
+    } @catch (NSException *exception) {
+        // cell 装饰失败不影响原功能
+    }
+    return cell;
+}
+
 // PSSpecifier is resolved at runtime; direct class references would break
 // linking for the SpringBoard slice.
 static PSSpecifier *axs_holdlaunch_specifier(NSString *name, id target, SEL set, SEL get) {
@@ -427,6 +475,19 @@ static void axs_holdlaunch_installSettingsHooks(void) {
         }
         // Color picker completion (delegate method added to the controller).
         class_addMethod(cls, @selector(colorPickerControllerDidFinish:), (IMP)axs_holdlaunch_colorPickerDidFinish_imp, "v@:@");
+    }
+
+    // Color circle button on the row + its tap handler.
+    SEL selCellForRow = @selector(tableView:cellForRowAtIndexPath:);
+    Method cellForRowMethod = class_getInstanceMethod(cls, selCellForRow);
+    if (cellForRowMethod) {
+        IMP cellOrig = method_getImplementation(cellForRowMethod);
+        if (class_addMethod(cls, selCellForRow, (IMP)axs_cellForRow_imp, method_getTypeEncoding(cellForRowMethod))) {
+            axs_origCellForRow = cellOrig;
+        } else {
+            MSHookMessageEx(cls, selCellForRow, (IMP)axs_cellForRow_imp, &axs_origCellForRow);
+        }
+        class_addMethod(cls, @selector(axs_holdlaunch_colorButtonTapped:), (IMP)axs_holdlaunch_colorButtonTapped_imp, "v@:@");
     }
     axs_settingsInstalled = YES;
     axs_holdlaunch_log(@"settings hooks installed");
