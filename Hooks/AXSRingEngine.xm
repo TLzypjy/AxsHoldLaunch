@@ -106,7 +106,7 @@ static void axs_ring_ensureMaps(void) {
 // total number of live ring layers; log whenever it changes
 static void axs_ring_logLayerCount(void) {
     NSUInteger total = 0;
-    for (NSMutableArray<CALayer *> *ls in axs_layers) { total += ls.count; }
+    for (NSMutableArray<CALayer *> *ls in axs_layers.allValues) { total += ls.count; }
     axs_ring_engine_log(@"ring layer attach: count=%lu", (unsigned long)total);
 }
 
