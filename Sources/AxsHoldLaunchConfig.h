@@ -20,7 +20,6 @@
 - (double)axs_holdlaunch_splitWindowCornerRadius;
 - (NSDictionary *)axs_holdlaunch_theirSnapshot;
 - (id)axs_holdlaunch_theirValueForKey:(NSString *)key defaultValue:(id)defaultValue;
-- (void)axs_holdlaunch_reload;
 - (id)axs_holdlaunch_valueForKey:(NSString *)key defaultValue:(id)defaultValue;
 - (void)axs_holdlaunch_reload;
 @end

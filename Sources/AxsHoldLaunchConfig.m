@@ -1,6 +1,10 @@
 #import "AxsHoldLaunchConfig.h"
 #import "AxsHoldLaunchPreferences.h"
 
+// defined in AXSRingEngine.xm; clears the per-container exclusion cache so a
+// changed exclusion list takes effect without recreating floating windows
+extern void axs_ring_configChanged(void);
+
 @interface AxsHoldLaunchConfig ()
 @property (atomic, copy) NSDictionary *snapshot;
 @property (atomic, copy) NSDictionary *theirSnapshot;   // com.susudear.screencoreprefs
@@ -65,11 +69,16 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
 }
 
 - (void)axs_holdlaunch_reload {
+    NSArray *oldExclusions = [self axs_holdlaunch_ringExcludedApplications];
     self.snapshot = axs_holdlaunch_readPreferences();
     // ScreenCore 原装域: 直读它的 plist 文件 (PS 写入 + cfprefsd 落盘)
     NSString *theirPath = axs_holdlaunch_theirPreferencesPath();
     NSDictionary *their = theirPath.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:theirPath] : nil;
     self.theirSnapshot = [their isKindOfClass:[NSDictionary class]] ? their : @{};
+    NSArray *newExclusions = [self axs_holdlaunch_ringExcludedApplications];
+    if (![oldExclusions isEqualToArray:newExclusions]) {
+        axs_ring_configChanged();
+    }
 }
 
 - (id)axs_holdlaunch_valueForKey:(NSString *)key defaultValue:(id)defaultValue {
@@ -133,7 +142,17 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
 
 - (NSArray *)axs_holdlaunch_ringExcludedApplications {
     id value = [self axs_holdlaunch_theirValueForKey:@"splitWindowRingExcludedApplications" defaultValue:@[]];
-    return [value isKindOfClass:[NSArray class]] ? value : @[];
+    if ([value isKindOfClass:[NSArray class]]) return value;
+    // SCFilteredApplicationListMultiSelectionController may store a bundle->BOOL map
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        NSMutableArray *enabled = [NSMutableArray array];
+        for (NSString *bundle in value) {
+            NSNumber *on = value[bundle];
+            if ([on isKindOfClass:[NSNumber class]] && [on boolValue]) [enabled addObject:bundle];
+        }
+        return enabled;
+    }
+    return @[];
 }
 
 - (double)axs_holdlaunch_splitWindowCornerRadius {

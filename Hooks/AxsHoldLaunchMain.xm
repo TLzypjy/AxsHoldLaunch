@@ -285,8 +285,9 @@ static void axs_holdlaunch_presentColorPicker(id self, NSString *title, NSString
         ((void(*)(id, SEL, BOOL))objc_msgSend)(picker, @selector(setSupportsAlpha:), NO);
     }
     if ([picker respondsToSelector:@selector(setInitialColor:)]) {
+        // ring/glow colors live in ScreenCore's own domain
         UIColor *initial = axs_holdlaunch_hexToColor(
-            [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_valueForKey:key defaultValue:nil],
+            [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:key defaultValue:nil],
             [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
         ((void(*)(id, SEL, id))objc_msgSend)(picker, @selector(setInitialColor:), initial);
     }
@@ -308,7 +309,7 @@ static void axs_holdlaunch_colorPickerDidFinish_imp(id self, SEL _cmd, id picker
     NSString *key = objc_getAssociatedObject(picker, @selector(axsGlowColorKey));
     if (color && key.length > 0) {
         NSString *hex = axs_holdlaunch_colorToHex(color);
-        axs_holdlaunch_writePreference(key, hex, nil);
+        axs_holdlaunch_writeTheirPreference(key, hex);
         if ([self respondsToSelector:@selector(reloadSpecifiers)]) {
             ((void(*)(id, SEL))objc_msgSend)(self, @selector(reloadSpecifiers));
         }
@@ -363,7 +364,7 @@ static id axs_cellForRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
         if ([key isEqualToString:AxsHoldLaunchKeyGlowColor]) { colorKey = key; tag = 1; }
         if (colorKey == nil) return cell;
 
-        NSString *hex = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_valueForKey:colorKey defaultValue:nil];
+        NSString *hex = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:colorKey defaultValue:nil];
         UIColor *color = axs_holdlaunch_hexToColor(hex, [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
         UIButton *dot = [UIButton buttonWithType:UIButtonTypeCustom];
         dot.frame = CGRectMake(0, 0, 28, 28);

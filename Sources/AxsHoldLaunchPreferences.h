@@ -7,6 +7,24 @@
 static NSString * const AxsHoldLaunchPreferencesDomain = @"com.axs.holdlaunch";
 static NSString * const AxsHoldLaunchPreferencesChanged = @"com.axs.holdlaunch.preferences-changed";
 
+// ScreenCore's own preference domain: the ring/glow rows in its settings
+// bundle read/write here, and the SpringBoard side listens for its save ping.
+static NSString * const AxsHoldLaunchTheirDomain = @"com.susudear.screencoreprefs";
+static NSString * const AxsHoldLaunchTheirPrefsSaved = @"com.susudear.screencoreprefs/saved";
+
+// Write one key into ScreenCore's domain via cfprefsd (cross-process safe),
+// then post the same Darwin notification its own specifier cells post.
+static inline BOOL axs_holdlaunch_writeTheirPreference(NSString *key, id value) {
+    if (key.length == 0) return NO;
+    CFPreferencesSetAppValue((__bridge CFStringRef)key,
+                            (__bridge CFTypeRef)value,
+                            (__bridge CFStringRef)AxsHoldLaunchTheirDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)AxsHoldLaunchTheirDomain);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)AxsHoldLaunchTheirPrefsSaved, NULL, NULL, true);
+    return YES;
+}
+
 static inline NSDictionary *axs_holdlaunch_readPreferences(void) {
     NSString *path = axs_holdlaunch_preferencesPath();
     NSDictionary *values = path.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
