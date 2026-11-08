@@ -197,7 +197,7 @@ static BOOL axs_hostingArgIsObject = NO;
 
 static void axs_holdlaunch_hostingBegan_imp(id self, SEL _cmd, void *arg) {
     if (axs_origHostingBegan) ((void(*)(id, SEL, void *))axs_origHostingBegan)(self, _cmd, arg);
-    if (axs_hostingArgIsObject) axs_ring_sessionHostingBegan((id)arg);
+    if (axs_hostingArgIsObject) axs_ring_sessionHostingBegan((__bridge id)arg);
 }
 
 // Hook -didMoveToWindow on exactly these two ScreenCore classes. Hooking the
