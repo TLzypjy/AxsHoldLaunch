@@ -218,6 +218,12 @@ static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
 static NSString * const AxsHoldLaunchKeyRingColor = @"splitWindowRingColor";
 static NSString * const AxsHoldLaunchKeyGlowColor = @"splitWindowGlowColor";
 
+static NSArray *axs_holdlaunch_injectedSpecifiers_imp(id self, SEL _cmd);
+static NSString * const AxsHoldLaunchKeyThreshold = @"HoldPressThreshold";
+static NSString * const AxsHoldLaunchKeyReverse = @"HoldPressReverse";
+static NSString * const AxsHoldLaunchKeyRingColor = @"splitWindowRingColor";
+static NSString * const AxsHoldLaunchKeyGlowColor = @"splitWindowGlowColor";
+
 static IMP axs_origSpecifiers = NULL;
 static IMP axs_origReadPrefValue = NULL;
 static IMP axs_origSetPrefValue = NULL;
