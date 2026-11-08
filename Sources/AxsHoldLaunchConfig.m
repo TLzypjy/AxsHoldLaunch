@@ -66,6 +66,36 @@ static void axs_holdlaunch_preferencesDidChange(CFNotificationCenterRef center, 
     return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
 }
 
+- (BOOL)axs_holdlaunch_glowFrameEnabled {
+    id value = [self axs_holdlaunch_valueForKey:@"GlowFrameEnabled" defaultValue:@YES];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : YES;
+}
+
+- (BOOL)axs_holdlaunch_glowFrameCustom {
+    id value = [self axs_holdlaunch_valueForKey:@"GlowFrameCustom" defaultValue:@NO];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
+}
+
+- (NSString *)axs_holdlaunch_glowFrameColor {
+    id value = [self axs_holdlaunch_valueForKey:@"GlowFrameColor" defaultValue:@"#34A1FF"];
+    return [value isKindOfClass:[NSString class]] ? value : @"#34A1FF";
+}
+
+- (BOOL)axs_holdlaunch_glowHaloEnabled {
+    id value = [self axs_holdlaunch_valueForKey:@"GlowHaloEnabled" defaultValue:@YES];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : YES;
+}
+
+- (BOOL)axs_holdlaunch_glowHaloCustom {
+    id value = [self axs_holdlaunch_valueForKey:@"GlowHaloCustom" defaultValue:@NO];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : NO;
+}
+
+- (NSString *)axs_holdlaunch_glowHaloColor {
+    id value = [self axs_holdlaunch_valueForKey:@"GlowHaloColor" defaultValue:@"#FFFFFF"];
+    return [value isKindOfClass:[NSString class]] ? value : @"#FFFFFF";
+}
+
 - (void)dealloc {
     CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                             (__bridge const void *)self);

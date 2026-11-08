@@ -353,6 +353,8 @@ static void axs_holdlaunch_installSettingsHooks(void) {
 
 // ---------------------------------------------------------------------------
 
+void axs_glow_engine_start(void);
+
 %group AxsHoldLaunchSpringBoardTrigger
 
 %hook SpringBoard
@@ -363,6 +365,7 @@ static void axs_holdlaunch_installSettingsHooks(void) {
 - (void)applicationDidFinishLaunching:(id)application {
     axs_holdlaunch_log(@"springboard didFinishLaunching");
     axs_holdlaunch_installSpringBoardHooks();
+    axs_glow_engine_start();
     %orig;
 }
 
