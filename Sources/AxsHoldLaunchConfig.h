@@ -25,6 +25,7 @@
 // 外框组
 - (double)axs_holdlaunch_ringFrameWidth;        // splitWindowRingFrameWidth 0-30
 - (double)axs_holdlaunch_ringFrameAlpha;        // splitWindowRingFrameAlpha 0-1
+- (double)axs_holdlaunch_ringFrameCornerRadius; // splitWindowRingCornerRadius 0=auto, 1-60 manual
 - (BOOL)axs_holdlaunch_ringFrameCustomEnabled;  // splitWindowRingFrameCustomEnabled
 - (NSString *)axs_holdlaunch_ringFrameColor;    // splitWindowRingFrameColor
 - (BOOL)axs_holdlaunch_ringFrameRandomColor;    // splitWindowRingFrameRandomColor

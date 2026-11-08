@@ -95,21 +95,46 @@ static char axs_encSessionForContainer = 0;
 static char axs_encSessionForBundle = 0;
 static char axs_encCloseSession = 0;
 
+// Modern encodings carry byte offsets after every token ("v24@0:8@16"), so a
+// token reader must skip the digits - reading them as types made every gate
+// close (session binding never fired, bundle stayed empty).
+static char axs_holdlaunch_typeToken(const char **pp) {
+    const char *p = *pp;
+    if (*p == '\0') return '\0';
+    char t = *p;
+    if (t == '^') {
+        p++;
+        if (*p) p++;
+    } else if (t == '{' || t == '[' || t == '(') {
+        char close = (t == '{') ? '}' : (t == ']') ? ']' : ')';
+        int depth = 0;
+        while (*p) {
+            if (*p == t) depth++;
+            else if (*p == close) { depth--; p++; if (depth == 0) break; continue; }
+            p++;
+        }
+        t = '{';
+    } else {
+        p++;
+    }
+    while (*p >= '0' && *p <= '9') p++; // byte offset
+    *pp = p;
+    return t;
+}
+
 static char axs_holdlaunch_encodingFlags(const char *types) {
     if (!types) return 0;
     char flags = 0;
     const char *p = types;
-    if (*p == '@' || *p == '#') flags |= 4; // return object
-    if (*p == '^') p++;
-    p++;                                     // return token
-    while (*p && *p != ':') p++;
-    if (*p == ':') p++;
-    for (int i = 0; i < 2; i++) {
-        if (*p == '\0') break;
-        if (*p == '@' || *p == '#') flags |= (i == 0 ? 1 : 2);
-        if (*p == '^') p++;
-        p++;
-    }
+    char tok;
+    tok = axs_holdlaunch_typeToken(&p);                 // return
+    if (tok == '@' || tok == '#') flags |= 4;
+    axs_holdlaunch_typeToken(&p);                       // '@' self
+    axs_holdlaunch_typeToken(&p);                       // ':' cmd
+    tok = axs_holdlaunch_typeToken(&p);                 // arg1
+    if (tok == '@' || tok == '#') flags |= 1;
+    tok = axs_holdlaunch_typeToken(&p);                 // arg2
+    if (tok == '@' || tok == '#') flags |= 2;
     return flags;
 }
 
@@ -331,13 +356,13 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
         break;
     }
     // verify sc_sessionDidBeginHosting:'s first argument is an object before
-    // treating it as a session (types = ret, ':', arg1, ...)
+    // treating it as a session
     for (Class hostingCls in axs_holdlaunch_classesDeclaring(@selector(sc_sessionDidBeginHosting:))) {
         Method m = class_getInstanceMethod(hostingCls, @selector(sc_sessionDidBeginHosting:));
         if (!m) continue;
-        const char *types = method_getTypeEncoding(m);
-        axs_hostingArgIsObject = (types != NULL && strlen(types) > 2 && types[2] == '@');
-        axs_holdlaunch_log(@"hosting began types=%s argIsObject=%d", types ?: "?", (int)axs_hostingArgIsObject);
+        axs_hostingArgIsObject = (axs_holdlaunch_encodingFlags(method_getTypeEncoding(m)) & 1) != 0;
+        axs_holdlaunch_log(@"hosting began types=%s argIsObject=%d",
+                           method_getTypeEncoding(m) ?: "?", (int)axs_hostingArgIsObject);
         break;
     }
     NSUInteger hostingCount = axs_holdlaunch_hookSelector(@selector(sc_sessionDidBeginHosting:), (IMP)axs_holdlaunch_hostingBegan_imp, &axs_origHostingBegan);
@@ -480,6 +505,7 @@ static NSString * const AxsHoldLaunchKeyExclude = @"splitWindowRingExcludedAppli
 static IMP axs_ringPage_origSpecifiers = NULL;
 static IMP axs_ringPage_origCellForRow = NULL;
 static IMP axs_ringPage_origDidSelect = NULL;
+static IMP axs_ringPage_origHeight = NULL;
 static NSBundle *axs_ringPage_bundle = nil;
 
 static NSBundle *axs_ring_page_bundle(id controller) {
@@ -790,6 +816,28 @@ static void axs_ringPage_switchChanged_imp(id self, SEL _cmd, UISwitch *sender) 
         CFSTR("com.susudear.screencoreprefs/saved"), NULL, NULL, true);
 }
 
+// note rows grow with their inline gray text; color rows are two-line
+static CGFloat axs_ringPage_height_imp(id self, SEL _cmd, id tableView, id indexPath) {
+    @try {
+        PSSpecifier *spec = nil;
+        if ([self respondsToSelector:@selector(specifierAtIndexPath:)]) {
+            spec = [self specifierAtIndexPath:indexPath];
+        }
+        NSString *key = [spec propertyForKey:@"key"];
+        if (axs_ring_page_isColorKey(key)) return 56.0;
+        NSString *note = [spec propertyForKey:@"note"];
+        if (note != nil) {
+            NSString *text = axs_ring_page_localized(self, note);
+            CGRect bounds = [text boundingRectWithSize:CGSizeMake(300, CGFLOAT_MAX)
+                                               options:NSStringDrawingUsesLineFragmentOrigin
+                                            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:11]}
+                                               context:nil];
+            return ceil(bounds.size.height) + 30.0;
+        }
+    } @catch (NSException *exception) { }
+    return ((CGFloat(*)(id, SEL, id, id))axs_ringPage_origHeight)(self, _cmd, tableView, indexPath);
+}
+
 static id axs_ringPage_cellForRow_imp(id self, SEL _cmd, id tableView, id indexPath) {
     @try {
         PSSpecifier *spec = nil;
@@ -911,6 +959,7 @@ static void axs_holdlaunch_installSettingsHooks(void) {
         { @selector(specifiers), (IMP)axs_ringPage_specifiers_imp, &axs_ringPage_origSpecifiers },
         { @selector(tableView:cellForRowAtIndexPath:), (IMP)axs_ringPage_cellForRow_imp, &axs_ringPage_origCellForRow },
         { @selector(tableView:didSelectRowAtIndexPath:), (IMP)axs_ringPage_didSelect_imp, &axs_ringPage_origDidSelect },
+        { @selector(tableView:heightForRowAtIndexPath:), (IMP)axs_ringPage_height_imp, &axs_ringPage_origHeight },
     };
     for (NSUInteger i = 0; i < sizeof(methodHooks) / sizeof(methodHooks[0]); i++) {
         Method m = class_getInstanceMethod(cls, methodHooks[i].sel);

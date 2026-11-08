@@ -72,9 +72,15 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
 - (void)axs_holdlaunch_reload {
     NSDictionary *oldTheir = [self axs_holdlaunch_theirSnapshot];
     self.snapshot = axs_holdlaunch_readPreferences();
-    // ScreenCore 原装域: 直读它的 plist 文件 (PS 写入 + cfprefsd 落盘)
-    NSString *theirPath = axs_holdlaunch_theirPreferencesPath();
-    NSDictionary *their = theirPath.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:theirPath] : nil;
+    // ScreenCore 原装域: 走 cfprefsd 实时读取。之前直读 plist 文件，
+    // cfprefsd 异步落盘有延迟，导致滑条/颜色调整不实时、选色不生效。
+    NSUserDefaults *theirDefaults = [[NSUserDefaults alloc] initWithSuiteName:AxsHoldLaunchTheirDomain];
+    [theirDefaults synchronize];
+    NSDictionary *their = [theirDefaults persistentDomainForName:AxsHoldLaunchTheirDomain];
+    if (![their isKindOfClass:[NSDictionary class]] || their.count == 0) {
+        NSString *theirPath = axs_holdlaunch_theirPreferencesPath();
+        their = theirPath.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:theirPath] : nil;
+    }
     self.theirSnapshot = [their isKindOfClass:[NSDictionary class]] ? their : @{};
     if (![oldTheir isEqualToDictionary:[self axs_holdlaunch_theirSnapshot]]) {
         axs_ring_configChanged();
@@ -162,6 +168,10 @@ static NSString *axs_theirString(AxsHoldLaunchConfig *config, NSString *key, NSS
 
 - (double)axs_holdlaunch_ringFrameAlpha {
     return axs_theirDouble(self, @"splitWindowRingFrameAlpha", 0.5, 0, 1);
+}
+
+- (double)axs_holdlaunch_ringFrameCornerRadius {
+    return axs_theirDouble(self, @"splitWindowRingCornerRadius", 0.0, 0, 60);
 }
 
 - (BOOL)axs_holdlaunch_ringFrameCustomEnabled {

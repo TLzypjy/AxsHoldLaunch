@@ -320,6 +320,15 @@ static UIBezierPath *axs_ring_path(CGRect frame, CGFloat radius) {
                                        cornerRadii:CGSizeMake(radius, radius)];
 }
 
+// ring corner radius: manual slider wins, then the container's own corner
+// radius, then ScreenCore's 圆角 preference
+static CGFloat axs_ring_radius(UIView *view, BOOL docked, AxsHoldLaunchConfig *config) {
+    CGFloat radius = [config axs_holdlaunch_ringFrameCornerRadius];
+    if (radius < 0.5) radius = view.layer.cornerRadius;
+    if (radius < 1) radius = docked ? 14.0 : [config axs_holdlaunch_splitWindowCornerRadius];
+    return radius;
+}
+
 // rebuild all layers for one entry (style/params changed, or first attach).
 // Layers go straight into the floating window's own layer tree.
 static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
@@ -331,8 +340,7 @@ static void axs_ring_buildLayers(NSString *key, UIView *view, UIWindow *host,
     if (!drawThis || host == nil) return;
 
     CGRect frame = [view convertRect:view.bounds toView:host];
-    CGFloat radius = view.layer.cornerRadius;
-    if (radius < 1) radius = docked ? 14.0 : [config axs_holdlaunch_splitWindowCornerRadius];
+    CGFloat radius = axs_ring_radius(view, docked, config);
 
     NSMutableArray<CALayer *> *layers = [NSMutableArray array];
     CGFloat z = 9999.0; // above the floating content inside its own window
@@ -453,9 +461,9 @@ static void axs_ring_tick(void) {
 
             // style signature: rebuild only when a style parameter changed
             NSString *styleSig = [NSString stringWithFormat:
-                @"%@|%.1f|f=%.2f,%.2f,%d,%@,%d|g=%d,%.1f,%.1f,%.1f|i=%d,%d,%.1f,%@,%d|b=%@",
+                @"%@|%.1f|f=%.2f,%.2f,%.1f,%d,%@,%d|g=%d,%.1f,%.1f,%.1f|i=%d,%d,%.1f,%@,%d|b=%@",
                 docked ? @"d" : @"f",
-                docked ? view.layer.cornerRadius : [config axs_holdlaunch_splitWindowCornerRadius],
+                axs_ring_radius(view, docked, config),
                 [config axs_holdlaunch_ringFrameWidth],
                 [config axs_holdlaunch_ringFrameAlpha],
                 (int)[config axs_holdlaunch_ringFrameCustomEnabled],
@@ -484,9 +492,7 @@ static void axs_ring_tick(void) {
                                   frame.origin.x, frame.origin.y,
                                   frame.size.width, frame.size.height];
             if (![axs_frameSig[key] isEqualToString:frameSig]) {
-                CGFloat radius = docked ? view.layer.cornerRadius
-                                        : [config axs_holdlaunch_splitWindowCornerRadius];
-                if (docked && radius < 1) radius = 14.0;
+                CGFloat radius = axs_ring_radius(view, docked, config);
                 UIBezierPath *path = axs_ring_path(frame, radius);
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
