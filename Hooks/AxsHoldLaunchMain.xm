@@ -62,11 +62,12 @@ static void axs_holdlaunch_log(NSString *format, ...) {
 static NSTimeInterval axs_arrivalTime = 0;        // when the current icon became selected
 static NSString *axs_arrivalBundle = nil;         // bundle id selected at axs_arrivalTime
 static NSString *axs_lastSeenBundle = nil;
+static NSString *axs_prevRealBundle = nil;        // previous real-app activation (auto-close)
+static NSTimeInterval axs_prevRealTime = 0;
 
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origGestureMode = NULL;
 static IMP axs_origArcGestureMode = NULL;
-static IMP axs_origRoute = NULL;
 static IMP axs_origSessionFor = NULL;
 
 static void axs_holdlaunch_recordArrival(NSString *bundle) {
@@ -80,8 +81,32 @@ static void axs_holdlaunch_recordArrival(NSString *bundle) {
 static void axs_holdlaunch_setSelectedBundle(id self, SEL _cmd, id bundle) {
     ((void(*)(id, SEL, id))axs_origSetSelectedBundle)(self, _cmd, bundle);
     axs_holdlaunch_recordArrival(bundle);
-    if ([bundle isKindOfClass:[NSString class]] && axs_arrivalTime > 0
-        && [bundle isEqualToString:axs_arrivalBundle]) {
+    if (![bundle isKindOfClass:[NSString class]]) return;
+
+    // ---- callback auto-close (repairs ScreenCore's own "返回原应用时关闭浮窗") ----
+    // When a new app window activates, close the previous app's floating
+    // session if it was activated 2..180s ago. This covers the jump flows
+    // ScreenCore's built-in close misses (payment callback, Sileo converter):
+    //   sileo -> converter : sileo's floating window is closed (suspended)
+    //   converter -> sileo : the converter window is closed
+    //   douyin -> wechat (payment) -> douyin : wechat window is closed
+    // system-tool:* entries are menu items, not app windows - skip them.
+    if (![bundle hasPrefix:@"system-tool:"]) {
+        NSString *previous = axs_prevRealBundle;
+        if (previous.length > 0
+            && ![bundle isEqualToString:previous]
+            && [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isTheirCallbackCloseEnabled]) {
+            NSTimeInterval gap = axs_holdlaunch_now() - axs_prevRealTime;
+            if (gap >= 2.0 && gap <= 180.0) {
+                axs_holdlaunch_closeSessionForBundle(previous,
+                    [NSString stringWithFormat:@"replaced-by:%@", bundle]);
+            }
+        }
+        axs_prevRealBundle = bundle;
+        axs_prevRealTime = axs_holdlaunch_now();
+    }
+
+    if (axs_arrivalTime > 0 && [bundle isEqualToString:axs_arrivalBundle]) {
         axs_holdlaunch_log(@"arrival(set) bundle=%@", bundle);
     }
 }
@@ -129,8 +154,6 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
 
 static __weak id axs_sessionManager = nil;
 static BOOL axs_sessionManagerLogged = NO;
-static NSTimeInterval axs_lastJumpTime = 0;
-static NSString *axs_lastJumpBundle = nil;
 
 static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) {
     if (axs_sessionManager == nil) {
@@ -149,30 +172,7 @@ static void axs_holdlaunch_closeSessionForBundle(NSString *bundleIdentifier, NSS
     id session = ((id(*)(id, SEL, id))objc_msgSend)(manager, @selector(sc_sessionForBundleIdentifier:), bundleIdentifier);
     if (session == nil) return;
     ((void(*)(id, SEL, id, BOOL))objc_msgSend)(manager, @selector(sc_closeSession:animated:), session, YES);
-    axs_holdlaunch_log(@"auto-closed jumped window bundle=%@ reason=%@", bundleIdentifier, reason);
-}
-
-static id axs_holdlaunch_route_imp(id self, SEL _cmd, id bundleIdentifier,
-                                   unsigned long options, unsigned long origin, BOOL forward) {
-    // Only bundleIdentifier is read as an object; the other arguments are
-    // passed through bit-exact as integers.
-    axs_holdlaunch_log(@"route bundle=%@", bundleIdentifier);
-    BOOL isString = [bundleIdentifier isKindOfClass:[NSString class]];
-    // Gate on ScreenCore's OWN callback-close switch so this repairs the
-    // original feature instead of adding a parallel one.
-    if (isString
-        && [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_isTheirCallbackCloseEnabled]
-        && axs_lastJumpBundle != nil
-        && ![bundleIdentifier isEqualToString:axs_lastJumpBundle]
-        && axs_holdlaunch_now() - axs_lastJumpTime <= 120.0) {
-        axs_holdlaunch_closeSessionForBundle(axs_lastJumpBundle, @"callback-return");
-    }
-    if (isString) {
-        axs_lastJumpBundle = bundleIdentifier;
-        axs_lastJumpTime = axs_holdlaunch_now();
-    }
-    return ((id(*)(id, SEL, id, unsigned long, unsigned long, BOOL))axs_origRoute)(
-        self, _cmd, bundleIdentifier, options, origin, forward);
+    axs_holdlaunch_log(@"auto-closed floating window bundle=%@ reason=%@", bundleIdentifier, reason);
 }
 
 static BOOL axs_springboardHooksInstalled = NO;
@@ -222,18 +222,14 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger modeCount = axs_holdlaunch_hookSelector(selMode, (IMP)axs_holdlaunch_gestureMode_imp_a, &axs_origGestureMode);
     NSUInteger arcModeCount = axs_holdlaunch_hookSelector(selArcMode, (IMP)axs_holdlaunch_gestureMode_imp_b, &axs_origArcGestureMode);
 
-    // Jump/callback auto-close hooks. The route selector is implemented on a
-    // class outside the SC* prefix (dispatched dynamically), so it needs the
-    // full-class scan; the rest are SC-declared.
-    SEL selRoute = @selector(sc_routeApplicationRequestForBundleIdentifier:options:origin:forward:);
-    NSUInteger routeCount = axs_holdlaunch_hookSelectorInScope(selRoute, (IMP)axs_holdlaunch_route_imp, &axs_origRoute, YES);
+    // Captures SCFloatingSceneManager so the auto-close can resolve sessions.
     SEL selSessionFor = @selector(sc_sessionForBundleIdentifier:);
     NSUInteger sessionForCount = axs_holdlaunch_hookSelector(selSessionFor, (IMP)axs_holdlaunch_sessionFor_imp, &axs_origSessionFor);
 
-    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu route=%lu sessionFor=%lu",
+    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu sessionFor=%lu",
                        (unsigned long)setBundleCount,
                        (unsigned long)modeCount, (unsigned long)arcModeCount,
-                       (unsigned long)routeCount, (unsigned long)sessionForCount);
+                       (unsigned long)sessionForCount);
 }
 
 // ---------------------------------------------------------------------------
