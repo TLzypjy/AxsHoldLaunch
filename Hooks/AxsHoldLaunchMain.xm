@@ -21,10 +21,9 @@
 //
 // Settings side:
 //   1. SCSplitSettingsController: threshold slider quantize hooks
-//   2. SCRingSettingsController: created at runtime as a PSListController
-//      subclass so PSListController itself loads RingSettings.plist +
-//      RingSettings.strings from ScreenCorePrefs.bundle; the controller only
-//      customises rendering (slider steppers, color swatches, exclude count)
+//   2. ring rows live flat in SplitSettings.plist (LAUNCH<->APPEARANCE);
+//      rendering hooks add -/+ steppers with 2-decimal values on sliders,
+//      #RRGGBB + swatch on color rows, and the exclude-row count subtitle
 // ---------------------------------------------------------------------------
 
 static NSTimeInterval axs_holdlaunch_now(void) {
@@ -363,10 +362,11 @@ static void axs_holdlaunch_colorPickerDidFinish_imp(id self, SEL _cmd, id picker
     [picker dismissViewControllerAnimated:YES completion:nil];
 }
 
-// --- ring page: runtime PSListController subclass ---------------------------
-// SCRingSettingsController -> PSListController loads RingSettings.plist and
-// RingSettings.strings from ScreenCorePrefs.bundle by class-name convention.
-// The overrides only customise rendering and interactions.
+// --- ring rows: rendering hooks on SCSplitSettingsController ----------------
+// The ring rows sit flat in SplitSettings.plist between LAUNCH and APPEARANCE.
+// The hooks only customise rendering and interactions; every other row passes
+// through untouched. Labels/footers localize from SplitSettings.strings (PS
+// handles most lookups; this is a fallback for footerText).
 
 static NSString * const AxsHoldLaunchKeyRingColor = @"splitWindowRingFrameColor";
 static NSString * const AxsHoldLaunchKeyGlowColor = @"splitWindowGlowColor";
@@ -377,11 +377,24 @@ static IMP axs_ringPage_origSpecifiers = NULL;
 static IMP axs_ringPage_origCellForRow = NULL;
 static IMP axs_ringPage_origDidSelect = NULL;
 static NSBundle *axs_ringPage_bundle = nil;
-static BOOL axs_ringPage_installed = NO;
 
-static NSString *axs_ring_page_localized(NSString *text) {
-    if (text.length == 0 || axs_ringPage_bundle == nil) return text;
-    NSString *result = [axs_ringPage_bundle localizedStringForKey:text value:nil table:@"RingSettings"];
+static NSBundle *axs_ring_page_bundle(id controller) {
+    if (axs_ringPage_bundle != nil) return axs_ringPage_bundle;
+    if ([controller respondsToSelector:@selector(bundle)]) {
+        axs_ringPage_bundle = [(PSListController *)controller bundle];
+    }
+    if (axs_ringPage_bundle == nil) {
+        axs_ringPage_bundle = [NSBundle bundleWithPath:
+            axs_holdlaunch_resourcePath(@"Library/PreferenceBundles/ScreenCorePrefs.bundle")];
+    }
+    return axs_ringPage_bundle;
+}
+
+static NSString *axs_ring_page_localized(id controller, NSString *text) {
+    if (text.length == 0) return text;
+    NSBundle *bundle = axs_ring_page_bundle(controller);
+    if (bundle == nil) return text;
+    NSString *result = [bundle localizedStringForKey:text value:nil table:@"SplitSettings"];
     if (result.length == 0 || [result isEqualToString:text]) return text;
     return result;
 }
@@ -406,12 +419,12 @@ static BOOL axs_ring_page_isColorKey(NSString *key) {
         || [key isEqualToString:AxsHoldLaunchKeyInnerColor];
 }
 
-static NSString *axs_ring_page_colorTitle(NSString *key) {
+static NSString *axs_ring_page_colorTitle(id self, NSString *key) {
     NSString *labelKey = nil;
     if ([key isEqualToString:AxsHoldLaunchKeyRingColor]) labelKey = @"RING_FRAME_COLOR";
     else if ([key isEqualToString:AxsHoldLaunchKeyGlowColor]) labelKey = @"RING_GLOW_COLOR";
     else if ([key isEqualToString:AxsHoldLaunchKeyInnerColor]) labelKey = @"RING_INNER_COLOR";
-    NSString *title = axs_ring_page_localized(labelKey);
+    NSString *title = axs_ring_page_localized(self, labelKey);
     if ([title isEqualToString:labelKey]) title = key;
     return title;
 }
@@ -431,12 +444,12 @@ static NSArray *axs_ringPage_specifiers_imp(id self, SEL _cmd) {
     NSArray *specs = ((NSArray *(*)(id, SEL))axs_ringPage_origSpecifiers)(self, _cmd);
     for (PSSpecifier *spec in specs) {
         NSString *label = [spec propertyForKey:@"label"];
-        NSString *localizedLabel = axs_ring_page_localized(label);
+        NSString *localizedLabel = axs_ring_page_localized(self, label);
         if (label != nil && ![localizedLabel isEqualToString:label]) {
             [spec setProperty:localizedLabel forKey:@"label"];
         }
         NSString *footer = [spec propertyForKey:@"footerText"];
-        NSString *localizedFooter = axs_ring_page_localized(footer);
+        NSString *localizedFooter = axs_ring_page_localized(self, footer);
         if (footer != nil && ![localizedFooter isEqualToString:footer]) {
             [spec setProperty:localizedFooter forKey:@"footerText"];
         }
@@ -447,7 +460,7 @@ static NSArray *axs_ringPage_specifiers_imp(id self, SEL _cmd) {
 static NSString *axs_ringPage_subtitle_imp(id self, SEL _cmd, PSSpecifier *spec) {
     NSString *key = [spec propertyForKey:@"key"];
     if (![key isEqualToString:AxsHoldLaunchKeyExclude]) return nil;
-    NSString *format = axs_ring_page_localized(@"RING_EXCLUDE_COUNT");
+    NSString *format = axs_ring_page_localized(self, @"RING_EXCLUDE_COUNT");
     if ([format isEqualToString:@"RING_EXCLUDE_COUNT"]) format = @"已选 %lu 个";
     return [NSString stringWithFormat:format, (unsigned long)axs_ring_page_excludeCount()];
 }
@@ -518,7 +531,7 @@ static UITableViewCell *axs_ringPage_sliderCell(id self, UITableView *tableView,
     }
 
     UILabel *title = (UILabel *)[cell viewWithTag:101];
-    title.text = axs_ring_page_localized([spec propertyForKey:@"label"]);
+    title.text = axs_ring_page_localized(self, [spec propertyForKey:@"label"]);
 
     double min = [[spec propertyForKey:@"min"] doubleValue];
     double max = [[spec propertyForKey:@"max"] doubleValue];
@@ -602,7 +615,7 @@ static void axs_ringPage_didSelect_imp(id self, SEL _cmd, id tableView, id index
         }
         NSString *key = [spec propertyForKey:@"key"];
         if (axs_ring_page_isColorKey(key)) {
-            axs_holdlaunch_presentColorPicker(self, axs_ring_page_colorTitle(key), key);
+            axs_holdlaunch_presentColorPicker(self, axs_ring_page_colorTitle(self, key), key);
             return;
         }
     } @catch (NSException *exception) { }
@@ -647,47 +660,12 @@ static void axs_ringPage_plus_imp(id self, SEL _cmd, UIButton *sender) {
 static void axs_ringPage_colorTapped_imp(id self, SEL _cmd, UIButton *sender) {
     NSString *key = objc_getAssociatedObject(sender, @selector(axsRingColorKey));
     if (key.length == 0) return;
-    axs_holdlaunch_presentColorPicker(self, axs_ring_page_colorTitle(key), key);
+    axs_holdlaunch_presentColorPicker(self, axs_ring_page_colorTitle(self, key), key);
 }
 
-static void axs_holdlaunch_installRingPageClasses(void) {
-    if (axs_ringPage_installed) return;
-    Class PSSuper = objc_getClass("PSListController");
-    if (PSSuper == nil) return;
-    axs_ringPage_origSpecifiers = method_getImplementation(class_getInstanceMethod(PSSuper, @selector(specifiers)));
-    axs_ringPage_origCellForRow = method_getImplementation(class_getInstanceMethod(PSSuper, @selector(tableView:cellForRowAtIndexPath:)));
-    axs_ringPage_origDidSelect = method_getImplementation(class_getInstanceMethod(PSSuper, @selector(tableView:didSelectRowAtIndexPath:)));
-    if (axs_ringPage_origSpecifiers == NULL || axs_ringPage_origCellForRow == NULL) {
-        axs_holdlaunch_log(@"ring page: PSListController methods missing, not installed");
-        return;
-    }
-
-    NSString *bundlePath = axs_holdlaunch_resourcePath(@"Library/PreferenceBundles/ScreenCorePrefs.bundle");
-    axs_ringPage_bundle = [NSBundle bundleWithPath:bundlePath];
-
-    Class cls = objc_allocateClassPair(PSSuper, "SCRingSettingsController", 0);
-    if (cls == nil) {
-        // already registered (previous install) - nothing to do
-        axs_ringPage_installed = YES;
-        return;
-    }
-    class_addMethod(cls, @selector(specifiers), (IMP)axs_ringPage_specifiers_imp, "@@:");
-    class_addMethod(cls, @selector(getSubtitleForSpecifier:), (IMP)axs_ringPage_subtitle_imp, "@@:@");
-    class_addMethod(cls, @selector(tableView:cellForRowAtIndexPath:), (IMP)axs_ringPage_cellForRow_imp, "@@:@@");
-    class_addMethod(cls, @selector(tableView:didSelectRowAtIndexPath:), (IMP)axs_ringPage_didSelect_imp, "v@:@@");
-    class_addMethod(cls, @selector(axs_ringMinus:), (IMP)axs_ringPage_minus_imp, "v@:@");
-    class_addMethod(cls, @selector(axs_ringPlus:), (IMP)axs_ringPage_plus_imp, "v@:@");
-    class_addMethod(cls, @selector(axs_ringSliderChanged:), (IMP)axs_ringPage_sliderChanged_imp, "v@:@");
-    class_addMethod(cls, @selector(axs_ringColorTapped:), (IMP)axs_ringPage_colorTapped_imp, "v@:@");
-    class_addMethod(cls, @selector(colorPickerControllerDidFinish:), (IMP)axs_holdlaunch_colorPickerDidFinish_imp, "v@:@");
-    objc_registerClassPair(cls);
-    axs_ringPage_installed = YES;
-    axs_holdlaunch_log(@"ring page class installed: SCRingSettingsController bundle=%@",
-                       axs_ringPage_bundle.bundlePath ?: @"(nil)");
-}
-
-// SCSplitSettingsController keeps only the threshold quantize hooks; every
-// other row in SplitSettings.plist is declarative and needs no hooking.
+// SCSplitSettingsController: threshold quantize + ring row rendering hooks.
+// The ring rows sit flat in SplitSettings.plist; every other row is
+// declarative and passes through untouched.
 static void axs_holdlaunch_installSettingsHooks(void) {
     if (axs_settingsInstalled) return;
     Class cls = objc_getClass("SCSplitSettingsController");
@@ -713,8 +691,31 @@ static void axs_holdlaunch_installSettingsHooks(void) {
             MSHookMessageEx(cls, selWrite, (IMP)axs_setPreferenceValue_imp, &axs_origSetPrefValue);
         }
     }
+
+    struct { SEL sel; IMP imp; IMP *orig; } methodHooks[] = {
+        { @selector(specifiers), (IMP)axs_ringPage_specifiers_imp, &axs_ringPage_origSpecifiers },
+        { @selector(tableView:cellForRowAtIndexPath:), (IMP)axs_ringPage_cellForRow_imp, &axs_ringPage_origCellForRow },
+        { @selector(tableView:didSelectRowAtIndexPath:), (IMP)axs_ringPage_didSelect_imp, &axs_ringPage_origDidSelect },
+    };
+    for (NSUInteger i = 0; i < sizeof(methodHooks) / sizeof(methodHooks[0]); i++) {
+        Method m = class_getInstanceMethod(cls, methodHooks[i].sel);
+        if (!m) continue;
+        IMP orig = method_getImplementation(m);
+        if (class_addMethod(cls, methodHooks[i].sel, methodHooks[i].imp, method_getTypeEncoding(m))) {
+            *methodHooks[i].orig = orig;
+        } else {
+            MSHookMessageEx(cls, methodHooks[i].sel, methodHooks[i].imp, methodHooks[i].orig);
+        }
+    }
+    class_addMethod(cls, @selector(getSubtitleForSpecifier:), (IMP)axs_ringPage_subtitle_imp, "@@:@");
+    class_addMethod(cls, @selector(axs_ringMinus:), (IMP)axs_ringPage_minus_imp, "v@:@");
+    class_addMethod(cls, @selector(axs_ringPlus:), (IMP)axs_ringPage_plus_imp, "v@:@");
+    class_addMethod(cls, @selector(axs_ringSliderChanged:), (IMP)axs_ringPage_sliderChanged_imp, "v@:@");
+    class_addMethod(cls, @selector(axs_ringColorTapped:), (IMP)axs_ringPage_colorTapped_imp, "v@:@");
+    class_addMethod(cls, @selector(colorPickerControllerDidFinish:), (IMP)axs_holdlaunch_colorPickerDidFinish_imp, "v@:@");
+
     axs_settingsInstalled = YES;
-    axs_holdlaunch_log(@"settings hooks installed (threshold quantize)");
+    axs_holdlaunch_log(@"settings hooks installed (quantize + ring rows)");
 }
 
 // ---------------------------------------------------------------------------
@@ -762,9 +763,6 @@ static void axs_holdlaunch_installSettingsHooks(void) {
             %init(AxsHoldLaunchSpringBoardTrigger);
         } else if (objc_getClass("PSListController") != nil) {
             axs_holdlaunch_log(@"loaded in Settings");
-            // the ring entry row's detail class must exist before the page is
-            // pushed, so register it up front
-            axs_holdlaunch_installRingPageClasses();
             %init(AxsHoldLaunchSettingsTrigger);
         } else {
             axs_holdlaunch_log(@"loaded in unknown process");

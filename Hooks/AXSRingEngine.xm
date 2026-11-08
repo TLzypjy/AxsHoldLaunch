@@ -217,6 +217,7 @@ void axs_ring_sessionClosed(id session) {
     if (session == nil) return;
     if (axs_meta == nil) return;
     NSString *sessionKey = axs_ring_keyFor(session);
+    NSUInteger removed = 0;
     for (NSString *key in [axs_meta allKeys]) {
         NSMutableDictionary *m = axs_meta[key];
         if (![m[@"session"] isEqualToString:sessionKey]) continue;
@@ -224,8 +225,12 @@ void axs_ring_sessionClosed(id session) {
         [axs_meta removeObjectForKey:key];
         [axs_views removeObjectForKey:key];
         [axs_hosts removeObjectForKey:key];
+        removed++;
     }
     [axs_sessionBundles removeObjectForKey:sessionKey];
+    if (removed > 0) {
+        axs_ring_engine_log(@"ring session closed: session=%p entries=%lu", session, (unsigned long)removed);
+    }
 }
 
 // sc_dockSession:fromCorner: - mark the session's floating entries docked and
@@ -234,9 +239,10 @@ void axs_ring_sessionDocked(id session) {
     if (session == nil) return;
     axs_ring_ensureMaps();
     NSString *sessionKey = axs_ring_keyFor(session);
+    NSUInteger marked = 0;
     for (NSString *key in [axs_meta allKeys]) {
         NSMutableDictionary *m = axs_meta[key];
-        if ([m[@"session"] isEqualToString:sessionKey]) m[@"docked"] = @YES;
+        if ([m[@"session"] isEqualToString:sessionKey]) { m[@"docked"] = @YES; marked++; }
     }
     id item = nil;
     @try { item = [session valueForKey:@"dockedItemView"]; } @catch (NSException *e) { }
@@ -262,6 +268,7 @@ void axs_ring_sessionDocked(id session) {
             m[@"excluded"] = nil;
         }
     }
+    axs_ring_engine_log(@"ring session docked: session=%p floatEntries=%lu", session, (unsigned long)marked);
     axs_ring_engine_wake();
 }
 
@@ -432,6 +439,8 @@ static void axs_ring_tick(void) {
             // stale entry: view or host window died
             if (m == nil || view == nil || host == nil || view.window == nil
                 || view.hidden || view.alpha < 0.01) {
+                axs_ring_engine_log(@"ring entry dropped: key=%@ view=%@ host=%@ window=%p alpha=%.2f",
+                                    key, view, host, view.window, view.alpha);
                 axs_ring_detachLayers(key);
                 [axs_meta removeObjectForKey:key];
                 [axs_views removeObjectForKey:key];
