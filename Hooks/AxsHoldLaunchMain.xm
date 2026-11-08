@@ -65,6 +65,18 @@ static void axs_holdlaunch_log(NSString *format, ...) {
 // SpringBoard: hold-launch gesture
 // ---------------------------------------------------------------------------
 
+// Ring engine C API (defined in AXSRingEngine.xm); .xm compiles as ObjC++,
+// so pin C linkage to match the engine's extern "C" definitions.
+extern "C" {
+void axs_ring_setSessionBundle(id session, NSString *bundle);
+void axs_ring_noteContainerForSession(id container, id session);
+void axs_ring_noteContainer(id view, id hostWindow, BOOL docked);
+void axs_ring_sessionHostingBegan(id session);
+void axs_ring_sessionClosed(id session);
+void axs_ring_sessionDocked(id session);
+void axs_ring_engine_wake(void);
+}
+
 // Main-thread gesture state; the hooks all run on the main thread.
 static NSTimeInterval axs_arrivalTime = 0;
 static NSString *axs_arrivalBundle = nil;
@@ -293,7 +305,6 @@ static NSString *axs_holdlaunch_colorToHex(UIColor *color) {
             (int)round(r * 255), (int)round(g * 255), (int)round(b * 255)];
 }
 
-static void axs_readPreferenceValue_imp(id self, SEL _cmd, id specifier) __attribute__((unused));
 static id axs_readPreferenceValue_imp(id self, SEL _cmd, id specifier) {
     id value = ((id(*)(id, SEL, id))axs_origReadPrefValue)(self, _cmd, specifier);
     NSString *key = [specifier propertyForKey:@"key"];
@@ -416,7 +427,6 @@ static double axs_ring_page_snap(double value, double min, double max, double st
     return v;
 }
 
-static void axs_ringPage_specifiers_imp(id self, SEL _cmd) __attribute__((unused));
 static NSArray *axs_ringPage_specifiers_imp(id self, SEL _cmd) {
     NSArray *specs = ((NSArray *(*)(id, SEL))axs_ringPage_origSpecifiers)(self, _cmd);
     for (PSSpecifier *spec in specs) {
