@@ -1,4 +1,4 @@
-﻿#import <UIKit/UIKit.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "AxsHoldLaunchConfig.h"
@@ -8,12 +8,18 @@
 // ---------------------------------------------------------------------------
 // SpringBoard side
 //
-// ScreenCore's ARC menu is tracked with these known selectors (binary is not
-// obfuscated; classes are discovered at runtime because the owning class is
-// not worth hardcoding). Dwell time = how long the finger stays on the
-// currently selected menu icon before releasing:
-//   dwell >= threshold -> fullscreen launch (reverse: split launch)
-//   dwell <  threshold -> split launch     (reverse: fullscreen launch)
+// Signature-safe hook set only. Every hook below has a confirmed ABI:
+//   - setSelectedBundleIdentifier: receives NSString values (proven by logs)
+//   - splitGestureLaunchMode / splitArcGestureLaunchMode getters are plain
+//     long -> long (Tq in the ObjC metadata; 0 = split, 1 = fullscreen per
+//     the specifier's validValues)
+//   - sc_routeApplicationRequestForBundleIdentifier:options:origin:forward:
+//     only bundleIdentifier is read as an object, the rest pass through as
+//     integer bits
+//   - sc_sessionForBundleIdentifier: object in, object out
+// The deep open funnel (sc_openTargetIdentifier:...launchFullscreen:) is
+// deliberately NOT hooked: two of its arguments have unconfirmed types and
+// getting them wrong crashed inside objc_retain.
 // ---------------------------------------------------------------------------
 
 static NSTimeInterval axs_holdlaunch_now(void) {
@@ -60,6 +66,8 @@ static NSString *axs_lastSeenBundle = nil;
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origGestureMode = NULL;
 static IMP axs_origArcGestureMode = NULL;
+static IMP axs_origRoute = NULL;
+static IMP axs_origSessionFor = NULL;
 
 static void axs_holdlaunch_recordArrival(NSString *bundle) {
     if (![bundle isKindOfClass:[NSString class]] || bundle.length == 0) return;
@@ -119,12 +127,10 @@ static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
 // the floating session of B. Uses only signature-safe hooks.
 // ---------------------------------------------------------------------------
 
-static IMP axs_origRoute = NULL;
-static IMP axs_origSessionFor = NULL;
 static __weak id axs_sessionManager = nil;
+static BOOL axs_sessionManagerLogged = NO;
 static NSTimeInterval axs_lastJumpTime = 0;
 static NSString *axs_lastJumpBundle = nil;
-static BOOL axs_sessionManagerLogged = NO;
 
 static id axs_holdlaunch_sessionFor_imp(id self, SEL _cmd, id bundleIdentifier) {
     if (axs_sessionManager == nil) {
@@ -221,8 +227,6 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     SEL selSessionFor = @selector(sc_sessionForBundleIdentifier:);
     NSUInteger sessionForCount = axs_holdlaunch_hookSelector(selSessionFor, (IMP)axs_holdlaunch_sessionFor_imp, &axs_origSessionFor);
 
-    // Only signature-safe hooks remain: the setter receives strings and the
-    // mode getters take/return plain longs (Tq in the ObjC metadata).
     axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu route=%lu sessionFor=%lu",
                        (unsigned long)setBundleCount,
                        (unsigned long)modeCount, (unsigned long)arcModeCount,
@@ -230,12 +234,9 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Settings side: inject three rows into ScreenCore's split settings "鍚姩" group.
-//
-// ScreenCorePrefs.bundle is loaded lazily when the user opens the page, so the
-// hook on SCSplitSettingsController cannot be installed in %ctor. Instead,
-// PSListController -loadView (present from the start) triggers the install on
-// the first ScreenCore list view load.
+// Settings side: the specifier rows themselves live in the patched
+// SplitSettings.plist; these hooks quantize the threshold value (input dialog
+// prefill + writes) so it never shows more than two decimals.
 // ---------------------------------------------------------------------------
 
 static NSString * const AxsHoldLaunchKeyEnabled = @"HoldPressEnabled";
@@ -284,20 +285,20 @@ static NSArray *axs_holdlaunch_injectedSpecifiers_imp(id self, SEL _cmd) {
     SEL setSel = @selector(axs_holdlaunch_writeValue:forSpecifier:);
     SEL getSel = @selector(axs_holdlaunch_readValueForSpecifier:);
 
-    PSSpecifier *enabled = axs_holdlaunch_specifier(@"闀挎寜鏉炬墜瑙﹀彂", self, setSel, getSel);
+    PSSpecifier *enabled = axs_holdlaunch_specifier(@"长按松手触发", self, setSel, getSel);
     [enabled setProperty:AxsHoldLaunchKeyEnabled forKey:@"key"];
     [enabled setProperty:@"PSSwitchCell" forKey:@"cellClass"];
     [enabled setIdentifier:@"axsHoldLaunchEnabledSpecifier"];
 
-    PSSpecifier *threshold = axs_holdlaunch_specifier(@"闀挎寜瑙﹀彂鏃堕棿", self, setSel, getSel);
+    PSSpecifier *threshold = axs_holdlaunch_specifier(@"触发时间（秒）", self, setSel, getSel);
     [threshold setProperty:AxsHoldLaunchKeyThreshold forKey:@"key"];
     [threshold setProperty:@"PSSliderCell" forKey:@"cellClass"];
-    [threshold setProperty:@(0.1) forKey:@"min"];
-    [threshold setProperty:@(3.0) forKey:@"max"];
+    [threshold setProperty:@(0.2) forKey:@"min"];
+    [threshold setProperty:@(5.0) forKey:@"max"];
     [threshold setProperty:@YES forKey:@"showValue"];
     [threshold setIdentifier:@"axsHoldLaunchThresholdSpecifier"];
 
-    PSSpecifier *reverse = axs_holdlaunch_specifier(@"鍙嶈浆闀挎寜鍔ㄤ綔", self, setSel, getSel);
+    PSSpecifier *reverse = axs_holdlaunch_specifier(@"反转长按动作", self, setSel, getSel);
     [reverse setProperty:AxsHoldLaunchKeyReverse forKey:@"key"];
     [reverse setProperty:@"PSSwitchCell" forKey:@"cellClass"];
     [reverse setIdentifier:@"axsHoldLaunchReverseSpecifier"];
@@ -318,17 +319,16 @@ static void axs_holdlaunch_writeValue_imp(id self, SEL _cmd, id value, PSSpecifi
     NSString *key = [spec propertyForKey:@"key"];
     if ([key isEqualToString:AxsHoldLaunchKeyThreshold]) {
         double threshold = [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : 1.0;
-        threshold = round(threshold / 0.05) * 0.05;
-        threshold = MIN(3.0, MAX(0.1, threshold));
-        value = @(threshold);
+        value = @(axs_holdlaunch_quantizeThreshold(threshold));
     }
     NSError *error = nil;
     if (!axs_holdlaunch_writePreference(key, value, &error)) {
-        NSString *message = [NSString stringWithFormat:@"鍐欏叆璁剧疆澶辫触锛?@", error.localizedDescription ?: @"鏈煡閿欒"];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"ARC 闀挎寜鍏ㄥ睆鍚姩"
+        NSString *message = [NSString stringWithFormat:@"Save failed: %@",
+                             error.localizedDescription ?: @"unknown error"];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"AxsHoldLaunch"
                                                                        message:message
                                                                 preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"濂? style:UIAlertActionStyleDefault handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];
     }
 }
@@ -338,7 +338,7 @@ static NSArray *axs_specifiers_imp(id self, SEL _cmd) {
     NSMutableArray *specifiers = [original mutableCopy] ?: [NSMutableArray array];
     for (PSSpecifier *spec in specifiers) {
         if ([[spec propertyForKey:@"key"] isEqualToString:AxsHoldLaunchKeyEnabled]) {
-            return original; // already injected
+            return original; // already provided by the patched SplitSettings.plist
         }
     }
 
@@ -347,7 +347,7 @@ static NSArray *axs_specifiers_imp(id self, SEL _cmd) {
         NSString *key = [(PSSpecifier *)specifiers[i] propertyForKey:@"key"];
         if ([key isEqualToString:@"splitSideGestureLaunchMode"]
             || [key isEqualToString:@"splitArcGestureLaunchMode"]) {
-            anchor = i; // keep the last match: the end of the "鍚姩" group
+            anchor = i; // keep the last match: the end of the "启动" group
         }
     }
 
@@ -358,8 +358,6 @@ static NSArray *axs_specifiers_imp(id self, SEL _cmd) {
         [specifiers insertObjects:added
                         atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(anchor + 1, added.count)]];
     }
-    NSLog(@"[AxsHoldLaunch] injected %lu specifiers (anchor=%lu of %lu)",
-          (unsigned long)added.count, (unsigned long)anchor, (unsigned long)specifiers.count);
     return specifiers;
 }
 
@@ -464,4 +462,3 @@ static void axs_holdlaunch_installSettingsHooks(void) {
         }
     }
 }
-
