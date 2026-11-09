@@ -103,34 +103,62 @@ static NSArray<UIColor *> *axs_bf_rainbow(void) {
               [UIColor purpleColor], [UIColor redColor] ];
 }
 
-// band geometry: everything reads the PRESENTATION layer so the border
-// follows resize/corner animations frame by frame (model bounds jump to the
-// final value at animation start, which is what made the border "not follow")
+// the visible rounded window = the container's largest child (the app
+// content view); ScreenCore animates the CHILD on resize while the container
+// itself follows at the end - so geometry must be sampled from the child
+static UIView *axs_bf_contentChild(UIView *container) {
+    UIView *best = nil;
+    CGFloat bestArea = 0;
+    for (UIView *sub in container.subviews) {
+        if (sub.hidden || sub.alpha < 0.05) continue;
+        CGFloat area = sub.bounds.size.width * sub.bounds.size.height;
+        if (area > bestArea) { bestArea = area; best = sub; }
+    }
+    return best;
+}
+
+// band geometry: everything reads the content child's PRESENTATION layer so
+// the border follows resize/corner animations frame by frame (the model
+// bounds jump to the final value at animation start, which is what made the
+// border lag and shift)
 static void axs_bf_updateGeometry(CALayer *holder, UIView *view, AxsHoldLaunchConfig *config) {
-    CGFloat w = view.bounds.size.width;
-    CGFloat h = view.bounds.size.height;
     CGFloat lineWidth = [config axs_holdlaunch_bfFrameWidth];
 
-    // visual (animated) corner radius: ScreenCore animates it on resize
-    CGFloat radius = 0;
-    CALayer *presentation = view.layer.presentationLayer;
-    if (presentation != nil) radius = presentation.cornerRadius;
+    UIView *content = axs_bf_contentChild(view) ?: view;
+    CALayer *pres = content.layer.presentationLayer;
+
+    CGFloat w, h, radius;
+    if (pres != nil) {
+        w = pres.bounds.size.width;
+        h = pres.bounds.size.height;
+        radius = pres.cornerRadius;
+    } else {
+        w = content.bounds.size.width;
+        h = content.bounds.size.height;
+        radius = content.layer.cornerRadius;
+    }
+    if (w < 40 || h < 40) { w = view.bounds.size.width; h = view.bounds.size.height; }
     if (radius < 1) radius = [config axs_holdlaunch_splitWindowCornerRadius];
     if (radius < 1) radius = 47.0;
 
-    // visual (animated) size
-    if (presentation != nil) {
-        CGRect pb = presentation.bounds;
-        if (pb.size.width > 20 && pb.size.height > 20) { w = pb.size.width; h = pb.size.height; }
+    // band origin: the child's animated frame in container coords (fallback centered)
+    CGFloat bx, by;
+    if (pres != nil) {
+        CGRect pf = pres.frame;
+        bx = pf.origin.x;
+        by = pf.origin.y;
+    } else {
+        bx = (view.bounds.size.width - w) / 2.0;
+        by = (view.bounds.size.height - h) / 2.0;
     }
 
     // expand the holder by half the diagonal so any rotation still covers the band
     CGFloat diag = hypot(w, h) / 2.0;
     CGFloat holderW = w + diag * 2;
     CGFloat holderH = h + diag * 2;
-    CGFloat dx = (holderW - w) / 2.0; // container origin in holder coords
+    CGFloat dx = (holderW - w) / 2.0;
     CGFloat dy = (holderH - h) / 2.0;
-    holder.frame = CGRectMake(-dx, -dy, holderW, holderH);
+    holder.frame = CGRectMake(bx - dx, by - dy, holderW, holderH);
 
     CGRect band = CGRectInset(CGRectMake(dx, dy, w, h), lineWidth / 2.0, lineWidth / 2.0);
     CGFloat bandRadius = radius - lineWidth / 2.0;
@@ -241,14 +269,15 @@ static void axs_bf_tick(void) {
                 if (axs_bfHolders[key] == nil) continue;
             }
 
-            // visual geometry incl. animated resizes; corner radius changes
-            // without a bounds change, so it rides along in the signature
-            CGRect visual = view.bounds;
-            CALayer *pres = view.layer.presentationLayer;
-            if (pres != nil) visual = pres.bounds;
-            CGFloat visRadius = pres != nil ? pres.cornerRadius : view.layer.cornerRadius;
-            NSString *boundsSig = [NSString stringWithFormat:@"%@|r=%.1f",
-                                   NSStringFromCGRect(visual), visRadius];
+            // visual geometry incl. animated resizes: sample the CONTENT
+            // child's presentation frame + radius (the child is what the user
+            // sees; the container itself follows at the end)
+            UIView *content = axs_bf_contentChild(view) ?: view;
+            CALayer *pres = content.layer.presentationLayer;
+            CGRect vf = pres != nil ? pres.frame : content.frame;
+            CGFloat vr = pres != nil ? pres.cornerRadius : content.layer.cornerRadius;
+            NSString *boundsSig = [NSString stringWithFormat:@"%p|%@|r=%.1f",
+                                   content, NSStringFromCGRect(vf), vr];
             if (![axs_bfBoundsSig[key] isEqualToString:boundsSig]) {
                 // window resized/rounded (possibly mid-animation): update in place
                 CALayer *holder = axs_bfHolders[key].firstObject;
