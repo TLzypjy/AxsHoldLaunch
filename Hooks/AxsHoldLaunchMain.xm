@@ -13,17 +13,13 @@
 //      icon (dwell start)
 //   2. the open-mode getter is consulted at decision time; the return value is
 //      overridden by dwell >= threshold (one-shot)
-//   3. ring engine feed hooks: container/host registration comes from
-//      -didMoveToWindow on SCFloatingContainerView / SCDockedFloatingItemView;
-//      sessions pair up through sc_sessionForContainerView:,
-//      sc_sessionDidBeginHosting:, the bundle setters and are torn down by
-//      sc_closeSession: / marked docked by sc_dockSession:fromCorner:
 //
 // Settings side:
 //   1. SCSplitSettingsController: threshold slider quantize hooks
-//   2. ring rows live flat in SplitSettings.plist (LAUNCH<->APPEARANCE);
+//   2. the 美化 rows live flat in SplitSettings.plist (LAUNCH<->APPEARANCE);
 //      rendering hooks add -/+ steppers with 2-decimal values on sliders,
-//      #RRGGBB + swatch on color rows, and the exclude-row count subtitle
+//      #RRGGBB + swatch on color rows, and gray inline notes where a row
+//      carries a "note" property
 // ---------------------------------------------------------------------------
 
 static NSTimeInterval axs_holdlaunch_now(void) {
@@ -64,79 +60,9 @@ static void axs_holdlaunch_log(NSString *format, ...) {
 // SpringBoard: hold-launch gesture
 // ---------------------------------------------------------------------------
 
-// Ring engine C API (defined in AXSRingEngine.xm); .xm compiles as ObjC++,
-// so pin C linkage to match the engine's extern "C" definitions. Session
-// arguments travel as raw words - the engine bridges only what callers
-// already gated on the hooked method's type encoding.
-extern "C" {
-void axs_ring_setSessionBundle(void *session, void *bundle);
-void axs_ring_noteContainerForSession(void *container, void *session);
-void axs_ring_noteContainer(id view, id hostWindow, BOOL docked);
-void axs_ring_sessionHostingBegan(void *session);
-void axs_ring_sessionClosed(void *session);
-void axs_ring_sessionDocked(void *session);
-void axs_ring_engine_wake(void);
-}
-
-// Ring engine feed hooks. Every hooked method is signature-proof: arguments
-// and returns travel as raw words and are only treated as objects when the
-// method's runtime type encoding says so - an id parameter (or a returned id)
-// over a primitive gets ARC-retained and crashes (objc_retain(0x1) safe-moded
-// SpringBoard twice already).
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origGestureMode = NULL;
 static IMP axs_origArcGestureMode = NULL;
-static IMP axs_origSessionForContainerView = NULL;
-static IMP axs_origSessionForBundle = NULL;
-static IMP axs_origCloseSession = NULL;
-
-// encoding flags: bit0 = arg1 object, bit1 = arg2 object, bit2 = return object
-static char axs_encSessionForContainer = 0;
-static char axs_encSessionForBundle = 0;
-static char axs_encCloseSession = 0;
-
-// Modern encodings carry byte offsets after every token ("v24@0:8@16"), so a
-// token reader must skip the digits - reading them as types made every gate
-// close (session binding never fired, bundle stayed empty).
-static char axs_holdlaunch_typeToken(const char **pp) {
-    const char *p = *pp;
-    if (*p == '\0') return '\0';
-    char t = *p;
-    if (t == '^') {
-        p++;
-        if (*p) p++;
-    } else if (t == '{' || t == '[' || t == '(') {
-        char close = (t == '{') ? '}' : (t == ']') ? ']' : ')';
-        int depth = 0;
-        while (*p) {
-            if (*p == t) depth++;
-            else if (*p == close) { depth--; p++; if (depth == 0) break; continue; }
-            p++;
-        }
-        t = '{';
-    } else {
-        p++;
-    }
-    while (*p >= '0' && *p <= '9') p++; // byte offset
-    *pp = p;
-    return t;
-}
-
-static char axs_holdlaunch_encodingFlags(const char *types) {
-    if (!types) return 0;
-    char flags = 0;
-    const char *p = types;
-    char tok;
-    tok = axs_holdlaunch_typeToken(&p);                 // return
-    if (tok == '@' || tok == '#') flags |= 4;
-    axs_holdlaunch_typeToken(&p);                       // '@' self
-    axs_holdlaunch_typeToken(&p);                       // ':' cmd
-    tok = axs_holdlaunch_typeToken(&p);                 // arg1
-    if (tok == '@' || tok == '#') flags |= 1;
-    tok = axs_holdlaunch_typeToken(&p);                 // arg2
-    if (tok == '@' || tok == '#') flags |= 2;
-    return flags;
-}
 
 // Main-thread gesture state; the hooks all run on the main thread.
 static NSTimeInterval axs_arrivalTime = 0;
@@ -187,101 +113,6 @@ static long axs_holdlaunch_gestureMode_imp_a(id self, SEL _cmd) {
 
 static long axs_holdlaunch_gestureMode_imp_b(id self, SEL _cmd) {
     return axs_holdlaunch_gestureMode_imp(self, _cmd, axs_origArcGestureMode);
-}
-
-// Ring engine feed hooks (raw-word pass-through, object treatment gated on
-// the runtime type encoding - see the block comment above).
-static void *axs_holdlaunch_sessionForContainerView_imp(id self, SEL _cmd, void *container) {
-    void *session = ((void *(*)(id, SEL, void *))axs_origSessionForContainerView)(self, _cmd, container);
-    if ((axs_encSessionForContainer & 1) && (axs_encSessionForContainer & 4)) {
-        axs_ring_noteContainerForSession(container, session);
-    }
-    return session;
-}
-
-static void *axs_holdlaunch_sessionForBundle_imp(id self, SEL _cmd, void *bundleIdentifier) {
-    void *session = ((void *(*)(id, SEL, void *))axs_origSessionForBundle)(self, _cmd, bundleIdentifier);
-    if ((axs_encSessionForBundle & 1) && (axs_encSessionForBundle & 4)) {
-        axs_ring_setSessionBundle(session, bundleIdentifier);
-    }
-    return session;
-}
-
-static void axs_holdlaunch_closeSession_imp(id self, SEL _cmd, void *session, void *animated) {
-    if (axs_encCloseSession & 1) {
-        axs_ring_sessionClosed(session);
-    }
-    ((void(*)(id, SEL, void *, void *))axs_origCloseSession)(self, _cmd, session, animated);
-}
-
-// sc_dockSession:fromCorner: is declared by TWO ScreenCore classes, so the
-// original IMP must be tracked per class - a single pointer would let class
-// A call class B's implementation and silently break the dock gesture.
-static Class axs_dockHookedClasses[4];
-static IMP axs_dockOrigImps[4];
-static int axs_dockHookedCount = 0;
-static char axs_encDockSession = 0;
-
-static void *axs_holdlaunch_dockSession_imp(id self, SEL _cmd, void *session, void *fromCorner) {
-    Class cls = object_getClass(self);
-    IMP orig = NULL;
-    for (int i = 0; i < axs_dockHookedCount; i++) {
-        if (axs_dockHookedClasses[i] == cls) { orig = axs_dockOrigImps[i]; break; }
-    }
-    if (axs_encDockSession & 1) {
-        axs_ring_sessionDocked(session);
-    }
-    if (orig != NULL) {
-        return ((void *(*)(id, SEL, void *, void *))orig)(self, _cmd, session, fromCorner);
-    }
-    return NULL;
-}
-
-// didMoveToWindow hooks: the ring registry's primary feed. A floating
-// container or docked mini item reports its host window the moment it enters
-// one; no view-tree scanning anywhere in the tick path.
-static IMP axs_origContainerDidMove = NULL;
-static IMP axs_origDockedDidMove = NULL;
-
-static void axs_holdlaunch_containerDidMove_imp(id self, SEL _cmd) {
-    if (axs_origContainerDidMove) ((void(*)(id, SEL))axs_origContainerDidMove)(self, _cmd);
-    axs_ring_noteContainer(self, [(UIView *)self window], NO);
-}
-
-static void axs_holdlaunch_dockedDidMove_imp(id self, SEL _cmd) {
-    if (axs_origDockedDidMove) ((void(*)(id, SEL))axs_origDockedDidMove)(self, _cmd);
-    axs_ring_noteContainer(self, [(UIView *)self window], YES);
-}
-
-// sc_sessionDidBeginHosting: backup pairing feed. Its real signature is not
-// confirmed - declaring the argument as void* keeps ARC from retaining a
-// non-object (objc_retain(0x1) crashed SpringBoard into safe mode); the
-// install step checks the actual type encoding before treating it as a session.
-static IMP axs_origHostingBegan = NULL;
-static BOOL axs_hostingArgIsObject = NO;
-
-static void axs_holdlaunch_hostingBegan_imp(id self, SEL _cmd, void *arg) {
-    if (axs_origHostingBegan) ((void(*)(id, SEL, void *))axs_origHostingBegan)(self, _cmd, arg);
-    if (axs_hostingArgIsObject) axs_ring_sessionHostingBegan(arg);
-}
-
-// Hook -didMoveToWindow on exactly these two ScreenCore classes. Hooking the
-// inherited UIView implementation is fine: MSHookMessageEx adds a local
-// override on the subclass itself.
-static NSUInteger axs_holdlaunch_hookDidMove(const char *className, IMP replacement, IMP *original) {
-    Class cls = objc_getClass(className);
-    if (!cls) {
-        axs_holdlaunch_log(@"ring hook: class %s not found", className);
-        return 0;
-    }
-    Method m = class_getInstanceMethod(cls, @selector(didMoveToWindow));
-    if (!m) {
-        axs_holdlaunch_log(@"ring hook: %s has no didMoveToWindow", className);
-        return 0;
-    }
-    MSHookMessageEx(cls, @selector(didMoveToWindow), replacement, original);
-    axs_holdlaunch_log(@"ring hook: didMoveToWindow on %s", className);
-    return 1;
 }
 
 static BOOL axs_springboardHooksInstalled = NO;
@@ -337,67 +168,13 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger modeCount = axs_holdlaunch_hookSelector(selMode, (IMP)axs_holdlaunch_gestureMode_imp_a, &axs_origGestureMode);
     NSUInteger arcModeCount = axs_holdlaunch_hookSelector(selArcMode, (IMP)axs_holdlaunch_gestureMode_imp_b, &axs_origArcGestureMode);
 
-    NSUInteger sessionForContainerCount = axs_holdlaunch_hookSelector(@selector(sc_sessionForContainerView:), (IMP)axs_holdlaunch_sessionForContainerView_imp, &axs_origSessionForContainerView);
-    NSUInteger sessionForBundleCount = axs_holdlaunch_hookSelector(@selector(sc_sessionForBundleIdentifier:), (IMP)axs_holdlaunch_sessionForBundle_imp, &axs_origSessionForBundle);
-    NSUInteger closeSessionCount = axs_holdlaunch_hookSelector(@selector(sc_closeSession:animated:), (IMP)axs_holdlaunch_closeSession_imp, &axs_origCloseSession);
-
-    // capture each method's real encoding before hooking: the IMPs only touch
-    // arguments/returns that the encoding says are objects
-    for (Class c in axs_holdlaunch_classesDeclaring(@selector(sc_sessionForContainerView:))) {
-        axs_encSessionForContainer = axs_holdlaunch_encodingFlags(method_getTypeEncoding(class_getInstanceMethod(c, @selector(sc_sessionForContainerView:))));
-        break;
-    }
-    for (Class c in axs_holdlaunch_classesDeclaring(@selector(sc_sessionForBundleIdentifier:))) {
-        axs_encSessionForBundle = axs_holdlaunch_encodingFlags(method_getTypeEncoding(class_getInstanceMethod(c, @selector(sc_sessionForBundleIdentifier:))));
-        break;
-    }
-    for (Class c in axs_holdlaunch_classesDeclaring(@selector(sc_closeSession:animated:))) {
-        axs_encCloseSession = axs_holdlaunch_encodingFlags(method_getTypeEncoding(class_getInstanceMethod(c, @selector(sc_closeSession:animated:))));
-        break;
-    }
-    // verify sc_sessionDidBeginHosting:'s first argument is an object before
-    // treating it as a session
-    for (Class hostingCls in axs_holdlaunch_classesDeclaring(@selector(sc_sessionDidBeginHosting:))) {
-        Method m = class_getInstanceMethod(hostingCls, @selector(sc_sessionDidBeginHosting:));
-        if (!m) continue;
-        axs_hostingArgIsObject = (axs_holdlaunch_encodingFlags(method_getTypeEncoding(m)) & 1) != 0;
-        axs_holdlaunch_log(@"hosting began types=%s argIsObject=%d",
-                           method_getTypeEncoding(m) ?: "?", (int)axs_hostingArgIsObject);
-        break;
-    }
-    NSUInteger hostingCount = axs_holdlaunch_hookSelector(@selector(sc_sessionDidBeginHosting:), (IMP)axs_holdlaunch_hostingBegan_imp, &axs_origHostingBegan);
-
-    // dockSession has per-class originals - see the hook comment above
-    NSUInteger dockSessionCount = 0;
-    for (Class dockCls in axs_holdlaunch_classesDeclaring(@selector(sc_dockSession:fromCorner:))) {
-        if (axs_dockHookedCount >= 4) break;
-        Method m = class_getInstanceMethod(dockCls, @selector(sc_dockSession:fromCorner:));
-        if (!m) continue;
-        if (axs_dockHookedCount == 0) {
-            axs_encDockSession = axs_holdlaunch_encodingFlags(method_getTypeEncoding(m));
-        }
-        axs_dockHookedClasses[axs_dockHookedCount] = dockCls;
-        axs_dockOrigImps[axs_dockHookedCount] = method_getImplementation(m);
-        axs_dockHookedCount++;
-        MSHookMessageEx(dockCls, @selector(sc_dockSession:fromCorner:), (IMP)axs_holdlaunch_dockSession_imp, NULL);
-        dockSessionCount++;
-    }
-
-    NSUInteger containerDidMoveCount = axs_holdlaunch_hookDidMove("SCFloatingContainerView", (IMP)axs_holdlaunch_containerDidMove_imp, &axs_origContainerDidMove);
-    NSUInteger dockedDidMoveCount = axs_holdlaunch_hookDidMove("SCDockedFloatingItemView", (IMP)axs_holdlaunch_dockedDidMove_imp, &axs_origDockedDidMove);
-
-    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu sessionForContainer=%lu sessionForBundle=%lu closeSession=%lu dockSession=%lu hosting=%lu containerDidMove=%lu dockedDidMove=%lu",
+    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu",
                        (unsigned long)setBundleCount,
-                       (unsigned long)modeCount, (unsigned long)arcModeCount,
-                       (unsigned long)sessionForContainerCount, (unsigned long)sessionForBundleCount,
-                       (unsigned long)closeSessionCount, (unsigned long)dockSessionCount,
-                       (unsigned long)hostingCount,
-                       (unsigned long)containerDidMoveCount, (unsigned long)dockedDidMoveCount);
-    axs_ring_engine_wake();
+                       (unsigned long)modeCount, (unsigned long)arcModeCount);
 }
 
 // ---------------------------------------------------------------------------
-// Settings: threshold quantize + ring page (SCRingSettingsController)
+// Settings: threshold quantize + 美化 rows (hooks on SCSplitSettingsController)
 // ---------------------------------------------------------------------------
 
 static NSString * const AxsHoldLaunchKeyThreshold = @"HoldPressThreshold";
@@ -685,71 +462,34 @@ static UITableViewCell *axs_ringPage_sliderCell(id self, UITableView *tableView,
     return cell;
 }
 
-// Color row, matching the LingDong look: blue label, "#RRGGBB:0.80" subtitle
-// underneath, round swatch on the right; tapping opens the color picker.
-static UITableViewCell *axs_ringPage_colorCell(id self, UITableView *tableView, PSSpecifier *spec) {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"AXSRingColor"];
-    if (cell == nil) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                     reuseIdentifier:@"AXSRingColor"];
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-
-        UILabel *title = [UILabel new];
-        title.tag = 201;
-        title.font = [UIFont systemFontOfSize:17];
-        title.textColor = [UIColor systemBlueColor];
-        title.translatesAutoresizingMaskIntoConstraints = NO;
-        [cell.contentView addSubview:title];
-
-        UILabel *subtitle = [UILabel new];
-        subtitle.tag = 202;
-        subtitle.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightRegular];
-        subtitle.textColor = [UIColor secondaryLabelColor];
-        subtitle.translatesAutoresizingMaskIntoConstraints = NO;
-        [cell.contentView addSubview:subtitle];
-
-        UIButton *swatch = [UIButton buttonWithType:UIButtonTypeCustom];
-        swatch.tag = 203;
-        swatch.layer.cornerRadius = 16;
-        swatch.layer.borderWidth = 1.5;
-        swatch.layer.borderColor = [UIColor colorWithWhite:0.75 alpha:1.0].CGColor;
-        swatch.userInteractionEnabled = YES;
-        swatch.translatesAutoresizingMaskIntoConstraints = NO;
-        [swatch addTarget:self action:@selector(axs_ringColorTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [cell.contentView addSubview:swatch];
-
-        UILayoutGuide *margin = cell.contentView.layoutMarginsGuide;
-        [NSLayoutConstraint activateConstraints:@[
-            [title.leadingAnchor constraintEqualToAnchor:margin.leadingAnchor],
-            [title.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:9],
-            [subtitle.leadingAnchor constraintEqualToAnchor:margin.leadingAnchor],
-            [subtitle.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:1],
-            [subtitle.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-9],
-            [swatch.trailingAnchor constraintEqualToAnchor:margin.trailingAnchor],
-            [swatch.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-            [swatch.widthAnchor constraintEqualToConstant:32],
-            [swatch.heightAnchor constraintEqualToConstant:32],
-        ]];
-    }
-
+// Color row in the base package's own layout: plain row, gray "#RRGGBB"
+// text plus a round swatch on the right; tapping opens the color picker.
+static UITableViewCell *axs_ringPage_colorCell(id self, SEL _cmd, id tableView, id indexPath, PSSpecifier *spec) {
+    UITableViewCell *cell = ((UITableViewCell *(*)(id, SEL, id, id))axs_ringPage_origCellForRow)(self, _cmd, tableView, indexPath);
     NSString *key = [spec propertyForKey:@"key"];
     NSString *hex = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:key defaultValue:nil];
-    UIColor *color = axs_holdlaunch_hexToColor(hex, [UIColor colorWithRed:0.2 green:0.63 blue:1.0 alpha:1.0]);
+    NSString *fallback = [spec propertyForKey:@"default"] ?: @"#FFFFFF";
+    UIColor *color = axs_holdlaunch_hexToColor(hex, axs_holdlaunch_hexToColor(fallback, [UIColor blueColor]));
 
-    double alpha = 1.0;
-    if ([key isEqualToString:AxsHoldLaunchKeyRingColor]) {
-        id a = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:@"splitWindowRingFrameAlpha" defaultValue:@(0.5)];
-        alpha = [a isKindOfClass:[NSNumber class]] ? [a doubleValue] : 0.5;
-    }
-    NSString *hexText = (hex.length > 0) ? hex : @"#34A1FF";
+    UIView *accessory = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 112, 30)];
+    UILabel *hexLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 4, 66, 22)];
+    hexLabel.text = (hex.length > 0) ? hex : fallback;
+    hexLabel.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
+    hexLabel.textColor = [UIColor secondaryLabelColor];
+    hexLabel.textAlignment = NSTextAlignmentRight;
+    [accessory addSubview:hexLabel];
 
-    UILabel *title = (UILabel *)[cell viewWithTag:201];
-    title.text = axs_ring_page_localized(self, [spec propertyForKey:@"label"]);
-    ((UILabel *)[cell viewWithTag:202]).text =
-        [NSString stringWithFormat:@"%@:%.2f", hexText, alpha];
-    UIButton *swatch = (UIButton *)[cell viewWithTag:203];
-    swatch.backgroundColor = color;
-    objc_setAssociatedObject(swatch, @selector(axsRingColorKey), key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIButton *dot = [UIButton buttonWithType:UIButtonTypeCustom];
+    dot.frame = CGRectMake(74, 0, 30, 30);
+    dot.backgroundColor = color;
+    dot.layer.cornerRadius = 15;
+    dot.layer.borderWidth = 1.5;
+    dot.layer.borderColor = [UIColor colorWithWhite:0.75 alpha:1.0].CGColor;
+    dot.userInteractionEnabled = YES;
+    objc_setAssociatedObject(dot, @selector(axsRingColorKey), key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [dot addTarget:self action:@selector(axs_ringColorTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [accessory addSubview:dot];
+    cell.accessoryView = accessory;
     return cell;
 }
 
@@ -816,15 +556,13 @@ static void axs_ringPage_switchChanged_imp(id self, SEL _cmd, UISwitch *sender) 
         CFSTR("com.susudear.screencoreprefs/saved"), NULL, NULL, true);
 }
 
-// note rows grow with their inline gray text; color rows are two-line
+// note rows grow with their inline gray text
 static CGFloat axs_ringPage_height_imp(id self, SEL _cmd, id tableView, id indexPath) {
     @try {
         PSSpecifier *spec = nil;
         if ([self respondsToSelector:@selector(specifierAtIndexPath:)]) {
             spec = [self specifierAtIndexPath:indexPath];
         }
-        NSString *key = [spec propertyForKey:@"key"];
-        if (axs_ring_page_isColorKey(key)) return 56.0;
         NSString *note = [spec propertyForKey:@"note"];
         if (note != nil) {
             NSString *text = axs_ring_page_localized(self, note);
@@ -850,7 +588,7 @@ static id axs_ringPage_cellForRow_imp(id self, SEL _cmd, id tableView, id indexP
         }
         NSString *key = [spec propertyForKey:@"key"];
         if (axs_ring_page_isColorKey(key)) {
-            return axs_ringPage_colorCell(self, tableView, spec);
+            return axs_ringPage_colorCell(self, _cmd, tableView, indexPath, spec);
         }
         if ([spec propertyForKey:@"note"] != nil) {
             return axs_ringPage_noteSwitchCell(self, tableView, spec);
@@ -1009,7 +747,6 @@ static void axs_holdlaunch_installSettingsHooks(void) {
 - (void)applicationDidFinishLaunching:(id)application {
     axs_holdlaunch_log(@"springboard didFinishLaunching");
     axs_holdlaunch_installSpringBoardHooks();
-    axs_ring_engine_wake();
     %orig;
 }
 
