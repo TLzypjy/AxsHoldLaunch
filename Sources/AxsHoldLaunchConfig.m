@@ -119,8 +119,8 @@ static double axs_theirDouble(AxsHoldLaunchConfig *config, NSString *key,
     return axs_theirString(self, @"splitWindowRingFrameColor", @"#93E3FD");
 }
 
-- (double)axs_holdlaunch_bfCornerRadius {
-    return axs_theirDouble(self, @"splitWindowRingCornerRadius", 0.0, 0, 100);
+- (double)axs_holdlaunch_bfFrameWidth {
+    return axs_theirDouble(self, @"splitWindowRingFrameWidth", 3.0, 0.5, 30);
 }
 
 - (id)axs_holdlaunch_valueForKey:(NSString *)key defaultValue:(id)defaultValue {

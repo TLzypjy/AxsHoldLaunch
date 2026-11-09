@@ -21,5 +21,5 @@
 - (BOOL)axs_holdlaunch_bfFrameEnabled;      // splitWindowRingFrameEnabled
 - (BOOL)axs_holdlaunch_bfCustomEnabled;     // splitWindowRingFrameCustomEnabled
 - (NSString *)axs_holdlaunch_bfFrameColor;  // splitWindowRingFrameColor
-- (double)axs_holdlaunch_bfCornerRadius;    // splitWindowRingCornerRadius（0 = 跟随浮窗）
+- (double)axs_holdlaunch_bfFrameWidth;      // splitWindowRingFrameWidth（边框粗细）
 @end

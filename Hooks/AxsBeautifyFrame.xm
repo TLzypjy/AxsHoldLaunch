@@ -103,6 +103,40 @@ static NSArray<UIColor *> *axs_bf_rainbow(void) {
               [UIColor purpleColor], [UIColor redColor] ];
 }
 
+// band geometry: border radius always follows the window's own corner radius
+static void axs_bf_updateGeometry(CALayer *holder, UIView *view, AxsHoldLaunchConfig *config) {
+    CGFloat w = view.bounds.size.width;
+    CGFloat h = view.bounds.size.height;
+    CGFloat lineWidth = [config axs_holdlaunch_bfFrameWidth];
+
+    CGFloat radius = view.layer.cornerRadius;
+    if (radius < 1) radius = 47.0;
+
+    // expand the holder by half the diagonal so any rotation still covers the band
+    CGFloat diag = hypot(w, h) / 2.0;
+    CGFloat holderW = w + diag * 2;
+    CGFloat holderH = h + diag * 2;
+    CGFloat dx = (holderW - w) / 2.0; // container origin in holder coords
+    CGFloat dy = (holderH - h) / 2.0;
+    holder.frame = CGRectMake(-dx, -dy, holderW, holderH);
+
+    CGRect band = CGRectInset(CGRectMake(dx, dy, w, h), lineWidth / 2.0, lineWidth / 2.0);
+    CGFloat bandRadius = radius - lineWidth / 2.0;
+    if (bandRadius < 0) bandRadius = 0;
+    if (bandRadius * 2 > band.size.width) bandRadius = band.size.width / 2;
+    if (bandRadius * 2 > band.size.height) bandRadius = band.size.height / 2;
+    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:band
+                                               byRoundingCorners:UIRectCornerAllCorners
+                                                     cornerRadii:CGSizeMake(bandRadius, bandRadius)];
+    CAShapeLayer *mask = (CAShapeLayer *)holder.mask;
+    mask.path = path.CGPath;
+    mask.lineWidth = lineWidth;
+
+    for (CALayer *sub in holder.sublayers) {
+        if ([sub isKindOfClass:[CAGradientLayer class]]) sub.frame = holder.bounds;
+    }
+}
+
 // rebuild the holder + gradient + mask for one container
 static void axs_bf_build(NSString *key, UIView *view, AxsHoldLaunchConfig *config) {
     axs_bf_detach(key);
@@ -114,40 +148,16 @@ static void axs_bf_build(NSString *key, UIView *view, AxsHoldLaunchConfig *confi
     CGFloat h = view.bounds.size.height;
     if (w < 40 || h < 40) return;
 
-    CGFloat lineWidth = 3.0;
-    CGFloat manualRadius = [config axs_holdlaunch_bfCornerRadius];
-    CGFloat radius = manualRadius > 0.5 ? manualRadius : view.layer.cornerRadius;
-    if (radius < 1) radius = 47.0;
-
-    // expand the holder by half the diagonal so any rotation still covers the band
-    CGFloat diag = hypot(w, h) / 2.0;
-    CGFloat holderW = w + diag * 2;
-    CGFloat holderH = h + diag * 2;
-    CGFloat dx = (holderW - w) / 2.0; // container origin in holder coords
-    CGFloat dy = (holderH - h) / 2.0;
-
     CALayer *holder = [CALayer layer];
-    holder.frame = CGRectMake(-dx, -dy, holderW, holderH);
     holder.backgroundColor = [UIColor clearColor].CGColor;
 
-    // border band path in holder coordinates
-    CGRect band = CGRectInset(CGRectMake(dx, dy, w, h), lineWidth / 2.0, lineWidth / 2.0);
-    CGFloat bandRadius = radius - lineWidth / 2.0;
-    if (bandRadius < 0) bandRadius = 0;
-    if (bandRadius * 2 > band.size.width) bandRadius = band.size.width / 2;
-    if (bandRadius * 2 > band.size.height) bandRadius = band.size.height / 2;
-    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:band
-                                               byRoundingCorners:UIRectCornerAllCorners
-                                                     cornerRadii:CGSizeMake(bandRadius, bandRadius)];
+    // border band mask (path/lineWidth filled in by updateGeometry)
     CAShapeLayer *mask = [CAShapeLayer layer];
-    mask.path = path.CGPath;
     mask.strokeColor = [UIColor whiteColor].CGColor;
     mask.fillColor = nil;
-    mask.lineWidth = lineWidth;
     holder.mask = mask;
 
     CAGradientLayer *grad = [CAGradientLayer layer];
-    grad.frame = holder.bounds;
     grad.type = kCAGradientLayerConic;
     grad.startPoint = CGPointMake(0.5, 0.5);
     grad.endPoint = CGPointMake(0.5, 0.0);
@@ -180,6 +190,7 @@ static void axs_bf_build(NSString *key, UIView *view, AxsHoldLaunchConfig *confi
 
     [view.layer addSublayer:holder];
     axs_bfHolders[key] = [NSMutableArray arrayWithObject:holder];
+    axs_bf_updateGeometry(holder, view, config);
     axs_bf_logCount();
 }
 
@@ -189,7 +200,6 @@ static void axs_bf_tick(void) {
         AxsHoldLaunchConfig *config = [AxsHoldLaunchConfig axs_holdlaunch_shared];
         BOOL enabled = [config axs_holdlaunch_bfFrameEnabled];
 
-        int drawn = 0;
         NSMutableArray<NSString *> *keys = [NSMutableArray array];
         for (NSString *k in axs_bfViews) { [keys addObject:k]; }
         for (NSString *key in keys) {
@@ -208,10 +218,10 @@ static void axs_bf_tick(void) {
             }
 
             BOOL custom = [config axs_holdlaunch_bfCustomEnabled];
-            NSString *styleSig = [NSString stringWithFormat:@"custom=%d,color=%@,radius=%.1f",
+            NSString *styleSig = [NSString stringWithFormat:@"custom=%d,color=%@,width=%.1f",
                                   (int)custom,
                                   custom ? [config axs_holdlaunch_bfFrameColor] : @"",
-                                  [config axs_holdlaunch_bfCornerRadius]];
+                                  [config axs_holdlaunch_bfFrameWidth]];
             if (![axs_bfStyleSig[key] isEqualToString:styleSig]) {
                 axs_bf_build(key, view, config);
                 axs_bfStyleSig[key] = styleSig;
@@ -221,25 +231,19 @@ static void axs_bf_tick(void) {
 
             NSString *boundsSig = NSStringFromCGRect(view.bounds);
             if (![axs_bfBoundsSig[key] isEqualToString:boundsSig]) {
-                // window resized: rebuild (gradient frame + band path)
-                axs_bf_build(key, view, config);
-                axs_bfStyleSig[key] = styleSig;
+                // window resized: update geometry in place (no flicker)
+                CALayer *holder = axs_bfHolders[key].firstObject;
+                if (holder != nil) axs_bf_updateGeometry(holder, view, config);
                 axs_bfBoundsSig[key] = boundsSig;
-                if (axs_bfHolders[key] == nil) continue;
             }
-
-            drawn++;
         }
 
-        if (axs_bfLink != nil && (drawn == 0 || axs_bfViews.count == 0)) {
-            axs_bfIdleFrames++;
-            if (axs_bfIdleFrames >= 30 && axs_bfLink != nil) {
-                axs_bf_log(@"frame tick idle, display link stopped");
-                [axs_bfLink invalidate];
-                axs_bfLink = nil;
-                axs_bfIdleFrames = 0;
-            }
-        } else {
+        // keep the tick alive while windows are registered: resizes happen
+        // without didMoveToWindow, so stopping here would leave stale borders
+        if (axs_bfLink != nil && axs_bfViews.count == 0) {
+            axs_bf_log(@"frame tick idle, display link stopped");
+            [axs_bfLink invalidate];
+            axs_bfLink = nil;
             axs_bfIdleFrames = 0;
         }
     } @catch (NSException *exception) {
