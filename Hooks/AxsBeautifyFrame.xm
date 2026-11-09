@@ -190,7 +190,9 @@ static void axs_bf_tick(void) {
         BOOL enabled = [config axs_holdlaunch_bfFrameEnabled];
 
         int drawn = 0;
-        for (NSString *key in [axs_bfViews allKeys]) {
+        NSMutableArray<NSString *> *keys = [NSMutableArray array];
+        for (NSString *k in axs_bfViews) { [keys addObject:k]; }
+        for (NSString *key in keys) {
             UIView *view = [axs_bfViews objectForKey:key];
 
             if (view == nil || view.window == nil || view.hidden || view.alpha < 0.01
@@ -279,7 +281,7 @@ void axs_bf_noteContainer(void *view) {
     NSString *key = axs_bf_keyFor(v);
     if ([axs_bfViews objectForKey:key] == v) return; // already tracked
     [axs_bfViews setObject:v forKey:key];
-    axs_bf_log(@"frame container noted: %p bounds=%@", view, NSStringFromCGRect(v.bounds));
+    axs_bf_log(@"frame container noted: %p bounds=%@", view, NSStringFromCGRect(((UIView *)v).bounds));
     axs_bf_engine_wake();
 }
 
