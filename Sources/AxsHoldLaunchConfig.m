@@ -123,6 +123,10 @@ static double axs_theirDouble(AxsHoldLaunchConfig *config, NSString *key,
     return axs_theirDouble(self, @"splitWindowRingFrameWidth", 3.0, 0.5, 30);
 }
 
+- (double)axs_holdlaunch_splitWindowCornerRadius {
+    return axs_theirDouble(self, @"splitWindowCornerRadius", 47.0, 0, 200);
+}
+
 - (id)axs_holdlaunch_valueForKey:(NSString *)key defaultValue:(id)defaultValue {
     return self.snapshot[key] ?: defaultValue;
 }
