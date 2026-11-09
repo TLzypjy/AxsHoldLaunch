@@ -1,0 +1,291 @@
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import "AxsHoldLaunchConfig.h"
+
+@interface AxsBFEngineTarget : NSObject
++ (instancetype)shared;
+- (void)axsBFTick;
+@end
+
+// ---------------------------------------------------------------------------
+// 美化 · 光圈外框 (marquee border fused with the floating window)
+//
+// Layers live INSIDE the floating container's own layer tree, so the border
+// moves / scales / animates together with the window - no overlay window, no
+// cross-window coordinate math:
+//
+//   container.layer
+//     └─ holder (static, frame = bounds expanded by half diagonal)
+//          ├─ mask = CAShapeLayer (the border band path, static)
+//          └─ grad (CAGradientLayer conic rainbow, rotation animation)
+//
+// The gradient child spins (Core Animation, render-server driven) while the
+// holder's mask keeps only the border band visible -> colors flow around the
+// window like a marquee with zero per-frame CPU.
+// ---------------------------------------------------------------------------
+
+static CADisplayLink *axs_bfLink = nil;
+static NSMapTable<NSString *, UIView *> *axs_bfViews = nil;       // key -> weak container
+static NSMutableDictionary<NSString *, NSMutableArray<CALayer *> *> *axs_bfHolders = nil;
+static NSMutableDictionary<NSString *, NSString *> *axs_bfStyleSig = nil;
+static NSMutableDictionary<NSString *, NSString *> *axs_bfBoundsSig = nil;
+static int axs_bfIdleFrames = 0;
+
+static void axs_bf_log(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+static void axs_bf_log(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    NSLog(@"[AxsHoldLaunch:BF] %@", message);
+    @try {
+        NSString *path = @"/var/mobile/Library/Caches/AxsHoldLaunch.log";
+        NSString *line = [NSString stringWithFormat:@"%@\n", message];
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (handle == nil) {
+            [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        } else {
+            [handle seekToEndOfFile];
+            [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [handle closeFile];
+        }
+    } @catch (NSException *exception) { }
+}
+
+static NSString *axs_bf_keyFor(id object) {
+    return [NSString stringWithFormat:@"%p", object];
+}
+
+static UIColor *axs_bf_parseHex(NSString *hex, UIColor *fallback) {
+    if (![hex isKindOfClass:[NSString class]] || hex.length == 0) return fallback;
+    NSString *h = [[hex stringByReplacingOccurrencesOfString:@"#" withString:@""]
+                   stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (h.length == 6 || h.length == 8) {
+        unsigned int v = 0;
+        NSScanner *scanner = [NSScanner scannerWithString:h];
+        [scanner scanHexInt:&v];
+        if (h.length == 6) v = (v << 8) | 0xFFu;
+        return [UIColor colorWithRed:((v >> 24) & 0xFF) / 255.0
+                               green:((v >> 16) & 0xFF) / 255.0
+                                blue:((v >> 8) & 0xFF) / 255.0
+                               alpha:(v & 0xFF) / 255.0];
+    }
+    return fallback;
+}
+
+static void axs_bf_ensureMaps(void) {
+    if (axs_bfViews != nil) return;
+    axs_bfViews = [NSMapTable mapTableWithKeyOptions:NSMapTableStrongMemory
+                                        valueOptions:NSMapTableWeakMemory];
+    axs_bfHolders = [NSMutableDictionary new];
+    axs_bfStyleSig = [NSMutableDictionary new];
+    axs_bfBoundsSig = [NSMutableDictionary new];
+}
+
+static void axs_bf_logCount(void) {
+    axs_bf_log(@"frame layers attached: count=%lu", (unsigned long)axs_bfHolders.count);
+}
+
+static void axs_bf_detach(NSString *key) {
+    NSMutableArray<CALayer *> *holders = axs_bfHolders[key];
+    for (CALayer *l in holders) { [l removeFromSuperlayer]; }
+    if (axs_bfHolders[key] != nil) {
+        [axs_bfHolders removeObjectForKey:key];
+        [axs_bfStyleSig removeObjectForKey:key];
+        [axs_bfBoundsSig removeObjectForKey:key];
+        axs_bf_logCount();
+    }
+}
+
+static NSArray<UIColor *> *axs_bf_rainbow(void) {
+    return @[ [UIColor redColor], [UIColor orangeColor], [UIColor yellowColor],
+              [UIColor greenColor], [UIColor cyanColor], [UIColor blueColor],
+              [UIColor purpleColor], [UIColor redColor] ];
+}
+
+// rebuild the holder + gradient + mask for one container
+static void axs_bf_build(NSString *key, UIView *view, AxsHoldLaunchConfig *config) {
+    axs_bf_detach(key);
+
+    BOOL custom = [config axs_holdlaunch_bfCustomEnabled];
+    UIColor *color = axs_bf_parseHex([config axs_holdlaunch_bfFrameColor], [UIColor cyanColor]);
+
+    CGFloat w = view.bounds.size.width;
+    CGFloat h = view.bounds.size.height;
+    if (w < 40 || h < 40) return;
+
+    CGFloat lineWidth = 3.0;
+    CGFloat manualRadius = [config axs_holdlaunch_bfCornerRadius];
+    CGFloat radius = manualRadius > 0.5 ? manualRadius : view.layer.cornerRadius;
+    if (radius < 1) radius = 47.0;
+
+    // expand the holder by half the diagonal so any rotation still covers the band
+    CGFloat diag = hypot(w, h) / 2.0;
+    CGFloat holderW = w + diag * 2;
+    CGFloat holderH = h + diag * 2;
+    CGFloat dx = (holderW - w) / 2.0; // container origin in holder coords
+    CGFloat dy = (holderH - h) / 2.0;
+
+    CALayer *holder = [CALayer layer];
+    holder.frame = CGRectMake(-dx, -dy, holderW, holderH);
+    holder.backgroundColor = [UIColor clearColor].CGColor;
+
+    // border band path in holder coordinates
+    CGRect band = CGRectInset(CGRectMake(dx, dy, w, h), lineWidth / 2.0, lineWidth / 2.0);
+    CGFloat bandRadius = radius - lineWidth / 2.0;
+    if (bandRadius < 0) bandRadius = 0;
+    if (bandRadius * 2 > band.size.width) bandRadius = band.size.width / 2;
+    if (bandRadius * 2 > band.size.height) bandRadius = band.size.height / 2;
+    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:band
+                                               byRoundingCorners:UIRectCornerAllCorners
+                                                     cornerRadii:CGSizeMake(bandRadius, bandRadius)];
+    CAShapeLayer *mask = [CAShapeLayer layer];
+    mask.path = path.CGPath;
+    mask.strokeColor = [UIColor whiteColor].CGColor;
+    mask.fillColor = nil;
+    mask.lineWidth = lineWidth;
+    holder.mask = mask;
+
+    CAGradientLayer *grad = [CAGradientLayer layer];
+    grad.frame = holder.bounds;
+    grad.type = kCAGradientLayerConic;
+    grad.startPoint = CGPointMake(0.5, 0.5);
+    grad.endPoint = CGPointMake(0.5, 0.0);
+    if (custom) {
+        UIColor *c = color;
+        grad.colors = @[ (__bridge id)c.CGColor, (__bridge id)c.CGColor ];
+    } else {
+        NSArray<UIColor *> *rainbow = axs_bf_rainbow();
+        NSMutableArray *colors = [NSMutableArray array];
+        for (UIColor *c in rainbow) { [colors addObject:(__bridge id)c.CGColor]; }
+        grad.colors = colors;
+        NSMutableArray *locations = [NSMutableArray array];
+        for (NSUInteger i = 0; i < rainbow.count; i++) {
+            [locations addObject:@((double)i / (double)(rainbow.count - 1))];
+        }
+        grad.locations = locations;
+    }
+    [holder addSublayer:grad];
+
+    if (!custom) {
+        // 跑马灯: colors sweep around the border continuously
+        CABasicAnimation *rot = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        rot.fromValue = @(0.0);
+        rot.toValue = @(2.0 * M_PI);
+        rot.duration = 4.0;
+        rot.repeatCount = HUGE_VALF;
+        rot.removedOnCompletion = NO;
+        [grad addAnimation:rot forKey:@"marquee"];
+    }
+
+    [view.layer addSublayer:holder];
+    axs_bfHolders[key] = [NSMutableArray arrayWithObject:holder];
+    axs_bf_logCount();
+}
+
+static void axs_bf_tick(void) {
+    @try {
+        axs_bf_ensureMaps();
+        AxsHoldLaunchConfig *config = [AxsHoldLaunchConfig axs_holdlaunch_shared];
+        BOOL enabled = [config axs_holdlaunch_bfFrameEnabled];
+
+        int drawn = 0;
+        for (NSString *key in [axs_bfViews allKeys]) {
+            UIView *view = [axs_bfViews objectForKey:key];
+
+            if (view == nil || view.window == nil || view.hidden || view.alpha < 0.01
+                || view.bounds.size.width < 40) {
+                axs_bf_detach(key);
+                [axs_bfViews removeObjectForKey:key];
+                continue;
+            }
+
+            if (!enabled) {
+                axs_bf_detach(key);
+                continue;
+            }
+
+            BOOL custom = [config axs_holdlaunch_bfCustomEnabled];
+            NSString *styleSig = [NSString stringWithFormat:@"custom=%d,color=%@,radius=%.1f",
+                                  (int)custom,
+                                  custom ? [config axs_holdlaunch_bfFrameColor] : @"",
+                                  [config axs_holdlaunch_bfCornerRadius]];
+            if (![axs_bfStyleSig[key] isEqualToString:styleSig]) {
+                axs_bf_build(key, view, config);
+                axs_bfStyleSig[key] = styleSig;
+                axs_bfBoundsSig[key] = @"";
+                if (axs_bfHolders[key] == nil) continue;
+            }
+
+            NSString *boundsSig = NSStringFromCGRect(view.bounds);
+            if (![axs_bfBoundsSig[key] isEqualToString:boundsSig]) {
+                // window resized: rebuild (gradient frame + band path)
+                axs_bf_build(key, view, config);
+                axs_bfStyleSig[key] = styleSig;
+                axs_bfBoundsSig[key] = boundsSig;
+                if (axs_bfHolders[key] == nil) continue;
+            }
+
+            drawn++;
+        }
+
+        if (axs_bfLink != nil && (drawn == 0 || axs_bfViews.count == 0)) {
+            axs_bfIdleFrames++;
+            if (axs_bfIdleFrames >= 30 && axs_bfLink != nil) {
+                axs_bf_log(@"frame tick idle, display link stopped");
+                [axs_bfLink invalidate];
+                axs_bfLink = nil;
+                axs_bfIdleFrames = 0;
+            }
+        } else {
+            axs_bfIdleFrames = 0;
+        }
+    } @catch (NSException *exception) {
+        axs_bf_log(@"frame tick exception: %@", exception);
+    }
+}
+
+@implementation AxsBFEngineTarget
++ (instancetype)shared {
+    static AxsBFEngineTarget *shared = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ shared = [self new]; });
+    return shared;
+}
+- (void)axsBFTick { axs_bf_tick(); }
+@end
+
+// --- C API (Main.xm hooks + Config) ---
+
+extern "C" {
+
+void axs_bf_engine_wake(void) {
+    if (axs_bfLink != nil) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (axs_bfLink != nil) return;
+        axs_bf_ensureMaps();
+        axs_bfLink = [CADisplayLink displayLinkWithTarget:[AxsBFEngineTarget shared]
+                                                 selector:@selector(axsBFTick)];
+        [axs_bfLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        axs_bf_log(@"frame display link started");
+    });
+}
+
+void axs_bf_noteContainer(void *view) {
+    if (view == NULL) return;
+    id v = (__bridge id)view;
+    if (![v isKindOfClass:[UIView class]]) return;
+    axs_bf_ensureMaps();
+    NSString *key = axs_bf_keyFor(v);
+    if ([axs_bfViews objectForKey:key] == v) return; // already tracked
+    [axs_bfViews setObject:v forKey:key];
+    axs_bf_log(@"frame container noted: %p bounds=%@", view, NSStringFromCGRect(v.bounds));
+    axs_bf_engine_wake();
+}
+
+void axs_bf_configChanged(void) {
+    if (axs_bfStyleSig != nil) [axs_bfStyleSig removeAllObjects];
+    axs_bf_engine_wake();
+}
+
+} // extern "C"

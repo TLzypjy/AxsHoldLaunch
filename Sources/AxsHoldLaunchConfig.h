@@ -16,4 +16,10 @@
 - (id)axs_holdlaunch_theirValueForKey:(NSString *)key defaultValue:(id)defaultValue;
 - (id)axs_holdlaunch_valueForKey:(NSString *)key defaultValue:(id)defaultValue;
 - (void)axs_holdlaunch_reload;
+
+// 美化 · 光圈外框（原装域）
+- (BOOL)axs_holdlaunch_bfFrameEnabled;      // splitWindowRingFrameEnabled
+- (BOOL)axs_holdlaunch_bfCustomEnabled;     // splitWindowRingFrameCustomEnabled
+- (NSString *)axs_holdlaunch_bfFrameColor;  // splitWindowRingFrameColor
+- (double)axs_holdlaunch_bfCornerRadius;    // splitWindowRingCornerRadius（0 = 跟随浮窗）
 @end

@@ -1,6 +1,10 @@
 #import "AxsHoldLaunchConfig.h"
 #import "AxsHoldLaunchPreferences.h"
 
+// defined in AxsBeautifyFrame.xm: 光圈外框样式/开关变化后重建图层
+extern void axs_bf_configChanged(void);
+extern void axs_bf_engine_wake(void);
+
 @interface AxsHoldLaunchConfig ()
 @property (atomic, copy) NSDictionary *snapshot;
 @property (atomic, copy) NSDictionary *theirSnapshot;   // com.susudear.screencoreprefs
@@ -64,6 +68,7 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
 }
 
 - (void)axs_holdlaunch_reload {
+    NSDictionary *oldTheir = [self axs_holdlaunch_theirSnapshot];
     self.snapshot = axs_holdlaunch_readPreferences();
     // ScreenCore 原装域：走 cfprefsd 实时读取（文件落盘有延迟，直读文件会让
     // 滑条/颜色的调整不实时）；文件仅在域为空时兜底。
@@ -75,6 +80,47 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
         their = theirPath.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:theirPath] : nil;
     }
     self.theirSnapshot = [their isKindOfClass:[NSDictionary class]] ? their : @{};
+    if (![oldTheir isEqualToDictionary:[self axs_holdlaunch_theirSnapshot]]) {
+        axs_bf_configChanged();
+    }
+    axs_bf_engine_wake();
+}
+
+#pragma mark - 美化 · 光圈外框
+
+static BOOL axs_theirBool(AxsHoldLaunchConfig *config, NSString *key, BOOL fallback) {
+    id value = [config axs_holdlaunch_theirValueForKey:key defaultValue:@(fallback)];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : fallback;
+}
+
+static NSString *axs_theirString(AxsHoldLaunchConfig *config, NSString *key, NSString *fallback) {
+    id value = [config axs_holdlaunch_theirValueForKey:key defaultValue:fallback];
+    return [value isKindOfClass:[NSString class]] ? value : fallback;
+}
+
+static double axs_theirDouble(AxsHoldLaunchConfig *config, NSString *key,
+                              double fallback, double lo, double hi) {
+    id value = [config axs_holdlaunch_theirValueForKey:key defaultValue:@(fallback)];
+    double v = [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : fallback;
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return v;
+}
+
+- (BOOL)axs_holdlaunch_bfFrameEnabled {
+    return axs_theirBool(self, @"splitWindowRingFrameEnabled", NO);
+}
+
+- (BOOL)axs_holdlaunch_bfCustomEnabled {
+    return axs_theirBool(self, @"splitWindowRingFrameCustomEnabled", NO);
+}
+
+- (NSString *)axs_holdlaunch_bfFrameColor {
+    return axs_theirString(self, @"splitWindowRingFrameColor", @"#93E3FD");
+}
+
+- (double)axs_holdlaunch_bfCornerRadius {
+    return axs_theirDouble(self, @"splitWindowRingCornerRadius", 0.0, 0, 100);
 }
 
 - (id)axs_holdlaunch_valueForKey:(NSString *)key defaultValue:(id)defaultValue {
