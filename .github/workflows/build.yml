@@ -142,3 +142,48 @@ jobs:
           tag_name: v${{ steps.bump.outputs.package_version }}
           name: ARC 长按全屏启动 v${{ steps.bump.outputs.package_version }}
           files: ./packages/*.deb
+
+  validate-repack:
+    name: Validate repack files (plutil/dpkg)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint patched plists and strings
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in validation/*.plist; do
+            [ -e "$f" ] || continue
+            if plutil -lint "$f"; then
+              echo "OK: $f"
+            else
+              echo "INVALID: $f"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Lint every plist/strings inside the repacked deb
+        run: |
+          set -euo pipefail
+          mkdir -p extract
+          dpkg-deb -x validation/package.deb extract
+          fail=0
+          while IFS= read -r f; do
+            if plutil -lint "$f"; then
+              echo "OK: $f"
+            else
+              echo "INVALID: $f"
+              fail=1
+            fi
+          done < <(find extract -type f \( -name '*.plist' -o -name '*.strings' \))
+          exit $fail
+
+      - name: Dump the beautify rows
+        run: |
+          set -euo pipefail
+          P="extract/var/jb/Library/PreferenceBundles/ScreenCorePrefs.bundle/SplitSettings.plist"
+          plutil -convert xml1 -o /tmp/split.xml "$P"
+          grep -n -A2 'BEAUTIFY_GROUP\|RING_FRAME\|GLOW_BLUR' /tmp/split.xml || true

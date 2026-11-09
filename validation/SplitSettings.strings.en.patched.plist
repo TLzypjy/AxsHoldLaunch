@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>INFO_FLOATING_SCREEN_CAPTURE_FILTER</key>
+	<string>Hide floating windows from captures</string>
+	<key>SPLIT_BUILT_IN_LANDSCAPE_KEYBOARD_SCALE_PERCENT</key>
+	<string>Landscape Built-in Scale</string>
+	<key>SPLIT_KEYBOARD_CORNER_RADIUS_ENABLED</key>
+	<string>Keyboard Corners</string>
+	<key>SPLIT_BUILT_IN_KEYBOARD_SCALE_TITLE</key>
+	<string>Scale Size</string>
+	<key>INFO_SPLIT_NOTIFICATION_TAP</key>
+	<string>Tap to split</string>
+	<key>SPLIT_GESTURE_LAUNCH_FULLSCREEN</key>
+	<string>Fullscreen</string>
+	<key>SPLIT_ASPECT_RATIO_CHANGE_TITLE</key>
+	<string>Window Aspect Ratio Changed</string>
+	<key>INFO_SPLIT_KEYBOARD_DISMISSAL</key>
+	<string>Dismiss an open keyboard during full-screen or split-screen transitions</string>
+	<key>SPLIT_WINDOW_SHADOW</key>
+	<string>Window Shadow</string>
+	<key>SPLIT_MEMORY_RESET_SUCCESS_MESSAGE</key>
+	<string>Remembered sizes and positions have been reset for all apps. New floating windows will use the default layout; future layout adjustments will be remembered again.</string>
+	<key>SPLIT_RESET_REMEMBERED_SIZE_POSITION_ACTION</key>
+	<string>Reset</string>
+	<key>SPLIT_NOTIFICATION_TAP</key>
+	<string>Tap Notification for Split</string>
+	<key>SPLIT_NOTIFICATION_LONG_PRESS</key>
+	<string>Long Press Notification for Split</string>
+	<key>INFO_SPLIT_DISABLE_FULLSCREEN_TO_FLOATING_ANIMATION</key>
+	<string>Disable only the fullscreen app's system dismissal animation; floating window handoff and layout remain unchanged.</string>
+	<key>INFO_SPLIT_EXTERNAL_KEYBOARD_SCALE</key>
+	<string>External resize</string>
+	<key>SPLIT_DOCK_RIGHT</key>
+	<string>Right</string>
+	<key>APPEARANCE</key>
+	<string>Appearance</string>
+	<key>INFO_SPLIT_EXTERNAL_LINK_ROUTING</key>
+	<string>Route app links into a floating window</string>
+	<key>SPLIT_RESET_REMEMBERED_SIZE_POSITION_CONFIRM</key>
+	<string>Clear remembered sizes and positions for all apps, including Crane containers, in portrait and landscape. New floating windows will use the default layout. Remembering stays enabled and other split settings are unchanged. This cannot be undone.</string>
+	<key>SPLIT_DOCK_WINDOW_SIZE</key>
+	<string>Docked Window Size</string>
+	<key>SPLIT_DEFAULT_DOCK_SIDE</key>
+	<string>Default Dock Side</string>
+	<key>SPLIT_CALLBACK_AUTO_CLOSE_FLOATING</key>
+	<string>Auto-Close on Callback</string>
+	<key>INFO_SPLIT_NOTIFICATION_PULL_DOWN</key>
+	<string>Pull-down split</string>
+	<key>SCREEN_CAPTURE_FILTER</key>
+	<string>Recording Filter</string>
+	<key>SPLIT_BUILT_IN_LANDSCAPE_KEYBOARD_SCALE</key>
+	<string>Landscape Built-in Expansion</string>
+	<key>CONFIRM</key>
+	<string>Confirm</string>
+	<key>SPLIT_WINDOW_CORNER_RADIUS_TITLE</key>
+	<string>Split Window Corner Radius</string>
+	<key>SPLIT_DEBUG_FOOTER</key>
+	<string>Shows the gesture regions outside floating windows. When disabled, the regions remain interactive but transparent.</string>
+	<key>BUILT_IN_KEYBOARD</key>
+	<string>Built-in</string>
+	<key>SPLIT_KEYBOARD_MODE_FOOTER</key>
+	<string>Portrait and landscape built-in expansion can be enabled independently for both native and 16:9 windows. Portrait expands to screen width and rests on the bottom edge. Landscape expands around the current window centerline using the scale: 0 disables expansion and 100 equals the display short edge. External is presented outside the floating window and keeps its own scaling switch.</string>
+	<key>INFO_SPLIT_SINGLE_ACTIVE_WINDOW</key>
+	<string>When the floating window limit is greater than 1, automatically dock older windows and keep the newest window on top.</string>
+	<key>SPLIT_GESTURE_LAUNCH_SPLIT</key>
+	<string>Split Screen</string>
+	<key>CANCEL</key>
+	<string>Cancel</string>
+	<key>INFO_SPLIT_NOTIFICATION_LONG_PRESS</key>
+	<string>Hold to split</string>
+	<key>INFO_SPLIT_WINDOW_SHADOW</key>
+	<string>Show window shadow</string>
+	<key>SPLIT_KEYBOARD_DISMISSAL</key>
+	<string>Dismiss Keyboard Automatically</string>
+	<key>SPLIT_BOTTOM_SWIPE_UP_CLOSE</key>
+	<string>Swipe Up to Close</string>
+	<key>SPLIT_DOCK_WINDOW_SIZE_TITLE</key>
+	<string>Docked Window Size</string>
+	<key>SPLIT_SYSTEM_URL_ROUTING</key>
+	<string>System URLs</string>
+	<key>ASPECT_RATIO_16_9</key>
+	<string>16:9</string>
+	<key>INFO_SPLIT_REMEMBER_SIZE_POSITION</key>
+	<string>Per-app memory; native and 16:9 share normal layout</string>
+	<key>SPLIT_SPRING_DAMPING</key>
+	<string>Spring Damping</string>
+	<key>INFO_SPLIT_ICON_SWIPE_DOWN</key>
+	<string>Swipe down</string>
+	<key>SPLIT_NOTIFICATION_PULL_DOWN</key>
+	<string>Pull Down Notification for Split</string>
+	<key>SPLIT_KEYBOARD_MODE</key>
+	<string>Keyboard Mode</string>
+	<key>SPLIT_WINDOW_SHADOW_RADIUS_TITLE</key>
+	<string>Shadow Size</string>
+	<key>SPLIT_SPRING_DAMPING_TITLE</key>
+	<string>Spring Damping</string>
+	<key>SPLIT_ICON_SWIPE_DOWN</key>
+	<string>Swipe Down to Split</string>
+	<key>SPLIT_SINGLE_ACTIVE_WINDOW</key>
+	<string>Always One Split Window</string>
+	<key>SPLIT_PORTRAIT_TOP_SPACING</key>
+	<string>Distance from Screen Top (pt)</string>
+	<key>SPLIT_16_9_BLACKLIST</key>
+	<string>16:9 Excluded Apps</string>
+	<key>SPLIT_EXTERNAL_LINK_ROUTING</key>
+	<string>Open URLs in Split View</string>
+	<key>SPLIT_MEMORY_RESET_SUCCESS_TITLE</key>
+	<string>Reset Complete</string>
+	<key>SPLIT_SHORTCUT_FLOATING</key>
+	<string>Shortcuts Floating Window</string>
+	<key>SPLIT_MEMORY_RESET_FAILURE_MESSAGE</key>
+	<string>Could not finish resetting remembered sizes and positions. Please try again.</string>
+	<key>SPLIT_EXTERNAL_LINK_EXCLUSIONS</key>
+	<string>Excluded URL Apps</string>
+	<key>SPLIT_SIDE_GESTURE_LAUNCH_MODE</key>
+	<string>Side Open Apps In</string>
+	<key>KEYBOARD</key>
+	<string>Keyboard</string>
+	<key>SPLIT_SPRING_ANIMATION</key>
+	<string>Spring Animation</string>
+	<key>SPLIT_WINDOW_LIMIT</key>
+	<string>Floating Window Limit</string>
+	<key>SPLIT_WINDOW_SHADOW_RADIUS</key>
+	<string>Shadow Size</string>
+	<key>SPLIT_BOTTOM_SWIPE_UP_CLOSE_THRESHOLD</key>
+	<string>Swipe Close Threshold</string>
+	<key>SPLIT_GESTURE_REGION_SIZE</key>
+	<string>External Gesture Region Size</string>
+	<key>SPLIT_ARC_GESTURE_LAUNCH_MODE</key>
+	<string>ARC Open Apps In</string>
+	<key>SPLIT_EXTERNAL_KEYBOARD_SCALE</key>
+	<string>External Keyboard Scaling</string>
+	<key>DEBUG</key>
+	<string>Debug</string>
+	<key>SPLIT_WINDOW_LIMIT_TITLE</key>
+	<string>Floating Window Limit</string>
+	<key>EXTERNAL_LINKS</key>
+	<string>External Links</string>
+	<key>INFO_SPLIT_CALLBACK_AUTO_CLOSE_FLOATING</key>
+	<string>Close the returning floating window</string>
+	<key>INFO_SPLIT_ICON_LONG_PRESS_MENU</key>
+	<string>Icon menu</string>
+	<key>ADJUST_GESTURE_TOUCH_REGION</key>
+	<string>Adjust Gesture Touch Region</string>
+	<key>SPLIT_DOCK_ICON</key>
+	<string>Show Docked App Icons</string>
+	<key>SPLIT_GESTURE_LAUNCH_MODE_FOOTER</key>
+	<string>Choose independently how apps open from ARC and side menus; the default is Split Screen. Unset choices retain the old launch mode without following edits to the other choice. Notification, URL, icon split actions and system tools are unchanged. Split Screen retains the separate fullscreen setting for Crane container switches.</string>
+	<key>SPLIT_REMEMBER_SIZE_POSITION</key>
+	<string>Remember Size &amp; Position</string>
+	<key>SPLIT_DEBUG_MODE</key>
+	<string>Split Debug Mode</string>
+	<key>SPLIT_ICON_SWIPE_UP</key>
+	<string>Swipe Up to Split</string>
+	<key>SPLIT_RESET_REMEMBERED_SIZE_POSITION</key>
+	<string>Reset Remembered Size &amp; Position</string>
+	<key>INFO_SPLIT_BUILT_IN_LANDSCAPE_KEYBOARD_SCALE</key>
+	<string>Expand in landscape</string>
+	<key>INFO_SPLIT_BOTTOM_SWIPE_UP_CLOSE</key>
+	<string>Flick up to close</string>
+	<key>SPLIT_PORTRAIT_TOP_SPACING_TITLE</key>
+	<string>Portrait Top Spacing</string>
+	<key>SPLIT_MEMORY_RESET_FAILURE_TITLE</key>
+	<string>Reset Incomplete</string>
+	<key>INFO_SPLIT_DOCK_ICON</key>
+	<string>Show app icons on docked floating windows. Turning this off hides only the icons; tapping to expand, dragging, and the docked windows remain unchanged.</string>
+	<key>INFO_SPLIT_BUILT_IN_PORTRAIT_KEYBOARD_SCALE</key>
+	<string>Expand in portrait</string>
+	<key>SPLIT_LANDSCAPE_APPLICATIONS</key>
+	<string>Landscape Apps</string>
+	<key>NATIVE_SIZE</key>
+	<string>Native Size</string>
+	<key>INFO_SPLIT_DEBUG_MODE</key>
+	<string>Shows zones</string>
+	<key>SPLIT_WINDOW_CORNER_RADIUS</key>
+	<string>Split Window Corner Radius</string>
+	<key>LAUNCH</key>
+	<string>Launch</string>
+	<key>SPLIT_BUILT_IN_PORTRAIT_KEYBOARD_SCALE</key>
+	<string>Portrait Built-in Expansion</string>
+	<key>INFO_SPLIT_KEYBOARD_CORNER_RADIUS_ENABLED</key>
+	<string>Round keyboard</string>
+	<key>EXTERNAL_KEYBOARD</key>
+	<string>External</string>
+	<key>SPLIT_DOCK_LEFT</key>
+	<string>Left</string>
+	<key>SPLIT_KEYBOARD_CORNER_RADIUS</key>
+	<string>Keyboard Corner Radius</string>
+	<key>SPLIT_KEYBOARD_DISMISSAL_DELAY</key>
+	<string>Keyboard Dismissal Delay</string>
+	<key>INFO_SPLIT_ICON_SWIPE_UP</key>
+	<string>Swipe up split</string>
+	<key>SPLIT_SETTINGS</key>
+	<string>Split Settings</string>
+	<key>SPLIT_BOTTOM_SWIPE_UP_CLOSE_THRESHOLD_TITLE</key>
+	<string>Fast Swipe Threshold</string>
+	<key>INFO_SPLIT_SYSTEM_URL_ROUTING</key>
+	<string>Handle system URL sources</string>
+	<key>SPLIT_ASPECT_RATIO_CHANGE_MESSAGE</key>
+	<string>The new ratio takes effect after logout. Confirm to logout in 1 second.</string>
+	<key>SPLIT_ASPECT_RATIO</key>
+	<string>Window Aspect Ratio</string>
+	<key>SPLIT_ICON_LONG_PRESS_MENU</key>
+	<string>Long Press App Icon Menu</string>
+	<key>GESTURES</key>
+	<string>Gestures</string>
+	<key>SPLIT_KEYBOARD_DISMISSAL_DELAY_TITLE</key>
+	<string>Dismissal Delay</string>
+	<key>SPLIT_DEFAULT_WINDOW_SIZE</key>
+	<string>Default Window Size</string>
+	<key>INFO_SPLIT_SHORTCUT_FLOATING</key>
+	<string>Open apps launched by Shortcuts in a floating window.</string>
+	<key>SPLIT_DISABLE_FULLSCREEN_TO_FLOATING_ANIMATION</key>
+	<string>Disable Fullscreen-to-Floating Animation</string>
+	<key>INFO_SPLIT_SPRING_ANIMATION</key>
+	<string>Spring motion</string>
+	<key>BEAUTIFY_GROUP</key>
+	<string>Beautify</string>
+	<key>RING_FRAME</key>
+	<string>Ring frame</string>
+	<key>RING_CUSTOM</key>
+	<string>Custom ring color</string>
+	<key>RING_COLOR</key>
+	<string>Ring color</string>
+	<key>GLOW</key>
+	<string>Window glow</string>
+	<key>GLOW_CUSTOM</key>
+	<string>Custom glow color</string>
+	<key>GLOW_COLOR</key>
+	<string>Glow color</string>
+	<key>EDGE_ICONS</key>
+	<string>Edge icons</string>
+	<key>CORNER_RADIUS</key>
+	<string>Corner radius</string>
+	<key>GLOW_BLUR</key>
+	<string>Window glow spread</string>
+	<key>触发时间（秒）</key>
+	<string>Trigger time (s)</string>
+</dict>
+</plist>
