@@ -168,8 +168,11 @@ jobs:
       - name: Lint every plist/strings inside the repacked deb
         run: |
           set -euo pipefail
-          mkdir -p extract
-          dpkg-deb -x validation/package.deb extract
+          mkdir -p arout extract
+          cd arout
+          ar x ../validation/package.deb
+          tar -xzf data.tar.gz -C ../extract
+          cd ..
           fail=0
           while IFS= read -r f; do
             if plutil -lint "$f"; then
