@@ -122,33 +122,66 @@ static NSString *axs_bf_styleSig(AxsHoldLaunchConfig *config) {
             [config axs_holdlaunch_bfFrameWidth]];
 }
 
-// geometry: prefer the container's PRESENTATION bounds (a spring resize
-// animates container.layer's bounds.size directly; the model jumps to the
-// final value at animation start)
-static void axs_bf_updateGeometry(CALayer *holder, UIView *view, AxsHoldLaunchConfig *config) {
-    CGFloat w = view.bounds.size.width;
-    CGFloat h = view.bounds.size.height;
-    CGFloat lineWidth = [config axs_holdlaunch_bfFrameWidth];
+// the visible rounded window = the container's largest child that stays
+// INSIDE the container bounds (the gesture overlay deliberately pokes out
+// ~21pt on every side, so size alone would pick the wrong one)
+static UIView *axs_bf_contentChild(UIView *container) {
+    UIView *best = nil;
+    CGFloat bestArea = 0;
+    CGFloat cw = container.bounds.size.width;
+    CGFloat ch = container.bounds.size.height;
+    for (UIView *sub in container.subviews) {
+        if (sub.hidden || sub.alpha < 0.05) continue;
+        CGRect f = sub.frame;
+        if (f.origin.x < -1 || f.origin.y < -1) continue;
+        if (f.size.width > cw + 1 || f.size.height > ch + 1) continue;
+        CGFloat area = f.size.width * f.size.height;
+        if (area > bestArea) { bestArea = area; best = sub; }
+    }
+    return best;
+}
 
+// geometry from the content child's presentation values: ScreenCore animates
+// the CHILD's bounds on resize (the container follows at the end), and the
+// rounded corners live on the child - the container itself has none
+static void axs_bf_updateGeometry(CALayer *holder, UIView *view, AxsHoldLaunchConfig *config) {
+    CGFloat lineWidth = [config axs_holdlaunch_bfFrameWidth];
+    CGFloat cw = view.bounds.size.width;
+    CGFloat ch = view.bounds.size.height;
+
+    UIView *content = axs_bf_contentChild(view);
+    CGFloat w = cw;
+    CGFloat h = ch;
     CGFloat radius = 0;
-    CALayer *presentation = view.layer.presentationLayer;
+
+    UIView *geoSource = content ?: view;
+    CALayer *presentation = geoSource.layer.presentationLayer;
     if (presentation != nil) {
         CGRect pb = presentation.bounds;
         if (pb.size.width > 20 && pb.size.height > 20) { w = pb.size.width; h = pb.size.height; }
         radius = presentation.cornerRadius;
+        if (radius < 1) radius = geoSource.layer.cornerRadius;
+    } else {
+        w = geoSource.bounds.size.width;
+        h = geoSource.bounds.size.height;
+        radius = geoSource.layer.cornerRadius;
     }
-    if (radius < 1) radius = view.layer.cornerRadius;
+    if (w < 40 || h < 40) { w = cw; h = ch; }
     if (radius < 1) radius = [config axs_holdlaunch_splitWindowCornerRadius];
     if (radius < 1) radius = 47.0;
+
+    // band rect centered on the container (the child fills it when settled)
+    CGFloat bx = (cw - w) / 2.0;
+    CGFloat by = (ch - h) / 2.0;
 
     CGFloat diag = hypot(w, h) / 2.0;
     CGFloat holderW = w + diag * 2;
     CGFloat holderH = h + diag * 2;
     CGFloat dx = (holderW - w) / 2.0;
     CGFloat dy = (holderH - h) / 2.0;
-    holder.frame = CGRectMake(-dx, -dy, holderW, holderH);
+    holder.frame = CGRectMake(bx - dx, by - dy, holderW, holderH);
 
-    CGRect band = CGRectInset(CGRectMake(0, 0, w, h), lineWidth / 2.0, lineWidth / 2.0);
+    CGRect band = CGRectInset(CGRectMake(dx, dy, w, h), lineWidth / 2.0, lineWidth / 2.0);
     CGFloat bandRadius = radius - lineWidth / 2.0;
     if (bandRadius < 0) bandRadius = 0;
     if (bandRadius * 2 > band.size.width) bandRadius = band.size.width / 2;
@@ -163,6 +196,15 @@ static void axs_bf_updateGeometry(CALayer *holder, UIView *view, AxsHoldLaunchCo
     for (CALayer *sub in holder.sublayers) {
         if ([sub isKindOfClass:[CAGradientLayer class]]) sub.frame = holder.bounds;
     }
+}
+
+// visibility gate: an invisible container/docked item must NOT carry a
+// border (invisible docked minis at their dock position were the "wandering
+// border" the user saw)
+static BOOL axs_bf_visible(UIView *view) {
+    if (view == nil || view.window == nil || view.hidden || view.alpha < 0.05) return NO;
+    if (view.bounds.size.width < 40 || view.bounds.size.height < 40) return NO;
+    return YES;
 }
 
 static CALayer *axs_bf_build(UIView *view, AxsHoldLaunchConfig *config) {
@@ -223,8 +265,8 @@ static void axs_bf_layout(UIView *view) {
     BOOL enabled = [config axs_holdlaunch_bfFrameEnabled];
 
     NSString *key = axs_bf_keyFor(view);
-    if (!enabled) {
-        axs_bf_detach(key); // switch turned off: drop the border
+    if (!enabled || !axs_bf_visible(view)) {
+        axs_bf_detach(key); // switch off or container invisible: drop the border
         return;
     }
 
@@ -264,7 +306,10 @@ static void axs_bf_tick(void) {
             UIView *view = [axs_bfViews objectForKey:key];
             if (view == nil) continue;
 
-            if (!enabled) {
+            // an invisible container/docked item must not carry a border:
+            // docked minis sit at their dock position with alpha=0 and were
+            // the "wandering border" the user saw
+            if (!enabled || !axs_bf_visible(view)) {
                 axs_bf_detach(key);
                 continue;
             }
@@ -273,16 +318,15 @@ static void axs_bf_tick(void) {
             CALayer *holder = holders.firstObject;
             if (holder == nil) continue; // layout hook builds first
 
-            CALayer *pres = view.layer.presentationLayer;
-            CGRect pb = pres != nil ? pres.bounds : view.bounds;
-            CGFloat pr = pres != nil ? pres.cornerRadius : 0;
-            NSString *tickSig = [NSString stringWithFormat:@"%@|r=%.1f",
-                                 NSStringFromCGRect(pb), pr];
+            UIView *content = axs_bf_contentChild(view) ?: view;
+            CALayer *pres = content.layer.presentationLayer;
+            CGRect pf = pres != nil ? pres.frame : content.frame;
+            CGFloat pr = pres != nil ? pres.cornerRadius : content.layer.cornerRadius;
+            NSString *tickSig = [NSString stringWithFormat:@"%p|%@|r=%.1f",
+                                 content, NSStringFromCGRect(pf), pr];
             if (![axs_bfTickSig[key] isEqualToString:tickSig]) {
                 axs_bf_updateGeometry(holder, view, config);
                 axs_bfTickSig[key] = tickSig;
-                axs_bf_log(@"frame tick update: %@ bounds=%@ radius=%.1f",
-                           key, NSStringFromCGRect(pb), pr);
             }
         }
 
