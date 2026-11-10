@@ -1,8 +1,6 @@
 #import <UIKit/UIKit.h>
 #import "AxsHoldLaunchConfig.h"
 
-extern void axs_bf_engine_wake(void);
-
 // ---------------------------------------------------------------------------
 // 美化 · 光圈外框 (marquee border fused with the floating window)
 //
