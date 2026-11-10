@@ -317,6 +317,14 @@ static void axs_bf_tick(void) {
 
 extern "C" {
 
+// called from the hooked -layoutSubviews of SCFloatingContainerView
+void axs_bf_layoutContainer(void *view) {
+    if (view == NULL) return;
+    id v = (__bridge id)view;
+    if (![v isKindOfClass:[UIView class]]) return;
+    axs_bf_layout(v);
+}
+
 void axs_bf_noteContainer(void *view) {
     if (view == NULL) return;
     id v = (__bridge id)view;
