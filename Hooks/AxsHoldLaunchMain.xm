@@ -63,36 +63,44 @@ static void axs_holdlaunch_log(NSString *format, ...) {
 // 美化 frame C API (defined in AxsBeautifyFrame.xm); raw pointer args.
 extern "C" {
 void axs_bf_noteContainer(void *view);
-void axs_bf_engine_wake(void);
+void axs_bf_layoutContainer(void *view);
+void axs_bf_configChanged(void);
 }
 
 static IMP axs_origSetSelectedBundle = NULL;
 static IMP axs_origGestureMode = NULL;
 static IMP axs_origArcGestureMode = NULL;
 
-// -didMoveToWindow on SCFloatingContainerView: the frame module's feed.
-// Hooking the inherited UIView implementation is fine: MSHookMessageEx adds a
-// local override on the subclass itself.
+// The frame follows the container's OWN layout pass (-layoutSubviews), the
+// same mechanism TrollOpen uses: the border path is rebuilt in the same
+// update cycle as the window resize, so both land in one CA commit and there
+// is no tracking delay at all. didMoveToWindow only registers the container.
 static IMP axs_origContainerDidMove = NULL;
+static IMP axs_origContainerLayout = NULL;
 
 static void axs_holdlaunch_containerDidMove_imp(id self, SEL _cmd) {
     if (axs_origContainerDidMove) ((void(*)(id, SEL))axs_origContainerDidMove)(self, _cmd);
     axs_bf_noteContainer((__bridge void *)self);
 }
 
-static NSUInteger axs_holdlaunch_hookDidMove(const char *className, IMP replacement, IMP *original) {
+static void axs_holdlaunch_containerLayout_imp(id self, SEL _cmd) {
+    if (axs_origContainerLayout) ((void(*)(id, SEL))axs_origContainerLayout)(self, _cmd);
+    axs_bf_layoutContainer((__bridge void *)self);
+}
+
+static NSUInteger axs_holdlaunch_hookMethod(const char *className, SEL sel, IMP replacement, IMP *original) {
     Class cls = objc_getClass(className);
     if (!cls) {
         axs_holdlaunch_log(@"bf hook: class %s not found", className);
         return 0;
     }
-    Method m = class_getInstanceMethod(cls, @selector(didMoveToWindow));
+    Method m = class_getInstanceMethod(cls, sel);
     if (!m) {
-        axs_holdlaunch_log(@"bf hook: %s has no didMoveToWindow", className);
+        axs_holdlaunch_log(@"bf hook: %s has no %s", className, sel_getName(sel));
         return 0;
     }
-    MSHookMessageEx(cls, @selector(didMoveToWindow), replacement, original);
-    axs_holdlaunch_log(@"bf hook: didMoveToWindow on %s", className);
+    MSHookMessageEx(cls, sel, replacement, original);
+    axs_holdlaunch_log(@"bf hook: %s on %s", sel_getName(sel), className);
     return 1;
 }
 
@@ -200,13 +208,14 @@ static void axs_holdlaunch_installSpringBoardHooks(void) {
     NSUInteger modeCount = axs_holdlaunch_hookSelector(selMode, (IMP)axs_holdlaunch_gestureMode_imp_a, &axs_origGestureMode);
     NSUInteger arcModeCount = axs_holdlaunch_hookSelector(selArcMode, (IMP)axs_holdlaunch_gestureMode_imp_b, &axs_origArcGestureMode);
 
-    NSUInteger containerDidMoveCount = axs_holdlaunch_hookDidMove("SCFloatingContainerView", (IMP)axs_holdlaunch_containerDidMove_imp, &axs_origContainerDidMove);
+    NSUInteger containerDidMoveCount = axs_holdlaunch_hookMethod("SCFloatingContainerView", @selector(didMoveToWindow), (IMP)axs_holdlaunch_containerDidMove_imp, &axs_origContainerDidMove);
+    NSUInteger containerLayoutCount = axs_holdlaunch_hookMethod("SCFloatingContainerView", @selector(layoutSubviews), (IMP)axs_holdlaunch_containerLayout_imp, &axs_origContainerLayout);
 
-    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu containerDidMove=%lu",
+    axs_holdlaunch_log(@"springboard hooks: setBundle=%lu mode=%lu arcMode=%lu containerDidMove=%lu containerLayout=%lu",
                        (unsigned long)setBundleCount,
                        (unsigned long)modeCount, (unsigned long)arcModeCount,
-                       (unsigned long)containerDidMoveCount);
-    axs_bf_engine_wake();
+                       (unsigned long)containerDidMoveCount,
+                       (unsigned long)containerLayoutCount);
 }
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,6 @@
 
 // defined in AxsBeautifyFrame.xm: 光圈外框样式/开关变化后重建图层
 extern void axs_bf_configChanged(void);
-extern void axs_bf_engine_wake(void);
 
 @interface AxsHoldLaunchConfig ()
 @property (atomic, copy) NSDictionary *snapshot;
@@ -83,7 +82,6 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
     if (![oldTheir isEqualToDictionary:[self axs_holdlaunch_theirSnapshot]]) {
         axs_bf_configChanged();
     }
-    axs_bf_engine_wake();
 }
 
 #pragma mark - 美化 · 光圈外框
