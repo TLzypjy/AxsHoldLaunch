@@ -404,7 +404,8 @@ void axs_bf_noteContainer(void *view) {
     // live, drop every OTHER container's border - ScreenCore's always-single
     // mode means only one floating window is visible, and two borders at once
     // (old + new container) is exactly the "wandering border".
-    if (isNew && v.window != nil && v.alpha > 0.05) {
+    UIView *uv = (UIView *)v;
+    if (isNew && uv.window != nil && uv.alpha > 0.05) {
         NSMutableArray<NSString *> *others = [NSMutableArray array];
         for (NSString *k in axs_bfViews) {
             if (![k isEqualToString:key] && axs_bfHolders[k] != nil) [others addObject:k];
@@ -415,7 +416,7 @@ void axs_bf_noteContainer(void *view) {
         }
     }
     axs_bf_log(@"frame container noted: %p bounds=%@",
-               view, NSStringFromCGRect(((UIView *)v).bounds));
+               view, NSStringFromCGRect(uv.bounds));
     axs_bf_engine_wake();
     // one-shot structure dump for diagnostics: what children does the
     // container actually have (which one is the visible window)?
