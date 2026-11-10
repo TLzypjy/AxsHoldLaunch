@@ -416,7 +416,6 @@ void axs_bf_noteContainer(void *view) {
     }
     axs_bf_log(@"frame container noted: %p bounds=%@",
                view, NSStringFromCGRect(((UIView *)v).bounds));
-}
     axs_bf_engine_wake();
     // one-shot structure dump for diagnostics: what children does the
     // container actually have (which one is the visible window)?
