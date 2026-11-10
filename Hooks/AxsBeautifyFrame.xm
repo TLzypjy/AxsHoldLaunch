@@ -317,6 +317,18 @@ static void axs_bf_tick(void) {
 
 extern "C" {
 
+void axs_bf_engine_wake(void) {
+    if (axs_bfLink != nil) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (axs_bfLink != nil) return;
+        axs_bf_ensureMaps();
+        axs_bfLink = [CADisplayLink displayLinkWithTarget:[AxsBFTickTarget shared]
+                                                 selector:@selector(axsBFTick)];
+        [axs_bfLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        axs_bf_log(@"frame display link started");
+    });
+}
+
 // called from the hooked -layoutSubviews of SCFloatingContainerView
 void axs_bf_layoutContainer(void *view) {
     if (view == NULL) return;
