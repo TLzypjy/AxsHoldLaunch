@@ -152,7 +152,7 @@ static void axs_bf_updateGeometry(CALayer *holder, UIView *view, AxsHoldLaunchCo
     }
 }
 
-static NSString *axs_bf_build(UIView *view, AxsHoldLaunchConfig *config) {
+static CALayer *axs_bf_build(UIView *view, AxsHoldLaunchConfig *config) {
     BOOL custom = [config axs_holdlaunch_bfCustomEnabled];
     UIColor *color = axs_bf_parseHex([config axs_holdlaunch_bfFrameColor], [UIColor cyanColor]);
 
