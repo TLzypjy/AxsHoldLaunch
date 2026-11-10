@@ -95,12 +95,14 @@ static void axs_bf_detach(NSString *key) {
     }
 }
 
-// drop entries whose container is gone
+// drop entries whose container is GONE (deallocated). Containers that merely
+// left the window stay registered: ScreenCore re-parents/re-creates the
+// container mid-drag, and removing their entry here would churn the border
+// (detach + rebuild every frame). Dormant holders are invisible anyway.
 static void axs_bf_prune(void) {
     NSMutableArray<NSString *> *dead = [NSMutableArray array];
     for (NSString *key in axs_bfViews) {
-        UIView *v = [axs_bfViews objectForKey:key];
-        if (v == nil || v.window == nil) [dead addObject:key];
+        if ([axs_bfViews objectForKey:key] == nil) [dead addObject:key];
     }
     for (NSString *key in dead) {
         axs_bf_detach(key);
@@ -270,6 +272,15 @@ static void axs_bf_layout(UIView *view) {
         return;
     }
 
+    // newest VISIBLE container wins: a dormant container coming back to a
+    // window must not show a second border next to the active one
+    for (NSString *k in axs_bfViews) {
+        if (![k isEqualToString:key] && axs_bfHolders[k] != nil) {
+            axs_bf_detach(k);
+            axs_bf_log(@"frame handover (layout): %@ -> %@", k, key);
+        }
+    }
+
     NSString *styleSig = axs_bf_styleSig(config);
     NSString *layoutSig = [NSString stringWithFormat:@"%@|%@",
                            NSStringFromCGRect(view.bounds), styleSig];
@@ -386,10 +397,26 @@ void axs_bf_noteContainer(void *view) {
     axs_bf_ensureMaps();
     axs_bf_prune();
     NSString *key = axs_bf_keyFor(v);
-    if ([axs_bfViews objectForKey:key] == v) return; // already tracked
+    BOOL isNew = ([axs_bfViews objectForKey:key] != v);
     [axs_bfViews setObject:v forKey:key];
+
+    // ScreenCore re-creates the container mid-drag. When the NEW container is
+    // live, drop every OTHER container's border - ScreenCore's always-single
+    // mode means only one floating window is visible, and two borders at once
+    // (old + new container) is exactly the "wandering border".
+    if (isNew && v.window != nil && v.alpha > 0.05) {
+        NSMutableArray<NSString *> *others = [NSMutableArray array];
+        for (NSString *k in axs_bfViews) {
+            if (![k isEqualToString:key] && axs_bfHolders[k] != nil) [others addObject:k];
+        }
+        for (NSString *k in others) {
+            axs_bf_detach(k);
+            axs_bf_log(@"frame handed over: %@ -> %@", k, key);
+        }
+    }
     axs_bf_log(@"frame container noted: %p bounds=%@",
                view, NSStringFromCGRect(((UIView *)v).bounds));
+}
     axs_bf_engine_wake();
     // one-shot structure dump for diagnostics: what children does the
     // container actually have (which one is the visible window)?
