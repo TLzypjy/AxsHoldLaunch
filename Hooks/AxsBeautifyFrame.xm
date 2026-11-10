@@ -332,7 +332,7 @@ void axs_bf_noteContainer(void *view) {
     // one-shot structure dump for diagnostics: what children does the
     // container actually have (which one is the visible window)?
     NSMutableArray *parts = [NSMutableArray array];
-    for (UIView *sub in v.subviews) {
+    for (UIView *sub in ((UIView *)v).subviews) {
         [parts addObject:[NSString stringWithFormat:@"%@%@", NSStringFromClass(sub.class), NSStringFromCGRect(sub.frame)]];
     }
     axs_bf_log(@"frame children: %@", [parts componentsJoinedByString:@" | "]);
