@@ -1,28 +1,33 @@
 #import <UIKit/UIKit.h>
 #import "AxsHoldLaunchConfig.h"
 
+extern void axs_bf_engine_wake(void);
+
 // ---------------------------------------------------------------------------
 // 美化 · 光圈外框 (marquee border fused with the floating window)
 //
-// TrollOpen-style zero-lag mechanism: the border geometry is updated
-// SYNCHRONOUSLY inside the floating container's own layout pass
-// (-layoutSubviews hook). When ScreenCore resizes the window, UIKit runs the
-// container's layout in the same update cycle, so the border path and the
-// window frame land in the SAME Core Animation commit - physically no delay.
+// Two complementary drivers:
+//   1. -layoutSubviews hook on SCFloatingContainerView: the border geometry
+//      is rebuilt SYNCHRONOUSLY inside the container's own layout pass, so a
+//      UIKit resize and the border path land in the same CA commit.
+//   2. A CADisplayLink fallback while containers are registered: ScreenCore
+//      also drives resizes with spring animations directly on the container
+//      LAYER (model jumps to the final value at animation start), and layer
+//      changes don't run UIKit layout - the link samples the container's
+//      PRESENTATION bounds per frame so animated resizes are followed too.
 //
 //   container.layer
-//     └─ holder (static between layouts)
-//          ├─ mask = CAShapeLayer (border band path, updated per layout)
+//     └─ holder
+//          ├─ mask = CAShapeLayer (border band path)
 //          └─ grad (CAGradientLayer conic rainbow, rotation animation)
-//
-// The gradient spin runs on the render server (CAAnimation) - zero CPU. No
-// display link is needed: layouts drive everything.
 // ---------------------------------------------------------------------------
 
+static CADisplayLink *axs_bfLink = nil;
 static NSMapTable<NSString *, UIView *> *axs_bfViews = nil;       // key -> weak container
 static NSMutableDictionary<NSString *, NSMutableArray<CALayer *> *> *axs_bfHolders = nil;
 static NSMutableDictionary<NSString *, NSString *> *axs_bfStyleSig = nil;
 static NSMutableDictionary<NSString *, NSString *> *axs_bfLayoutSig = nil;
+static NSMutableDictionary<NSString *, NSString *> *axs_bfTickSig = nil;
 
 static void axs_bf_log(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 static void axs_bf_log(NSString *format, ...) {
@@ -73,6 +78,7 @@ static void axs_bf_ensureMaps(void) {
     axs_bfHolders = [NSMutableDictionary new];
     axs_bfStyleSig = [NSMutableDictionary new];
     axs_bfLayoutSig = [NSMutableDictionary new];
+    axs_bfTickSig = [NSMutableDictionary new];
 }
 
 static void axs_bf_logCount(void) {
@@ -86,11 +92,12 @@ static void axs_bf_detach(NSString *key) {
         [axs_bfHolders removeObjectForKey:key];
         [axs_bfStyleSig removeObjectForKey:key];
         [axs_bfLayoutSig removeObjectForKey:key];
+        [axs_bfTickSig removeObjectForKey:key];
         axs_bf_logCount();
     }
 }
 
-// drop entries whose container is gone (called on every note/config/layout)
+// drop entries whose container is gone
 static void axs_bf_prune(void) {
     NSMutableArray<NSString *> *dead = [NSMutableArray array];
     for (NSString *key in axs_bfViews) {
@@ -117,14 +124,22 @@ static NSString *axs_bf_styleSig(AxsHoldLaunchConfig *config) {
             [config axs_holdlaunch_bfFrameWidth]];
 }
 
-// geometry from the container's CURRENT bounds; radius follows the window's
-// own corner radius (ScreenCore's 圆角 preference), updated in the same layout
+// geometry: prefer the container's PRESENTATION bounds (a spring resize
+// animates container.layer's bounds.size directly; the model jumps to the
+// final value at animation start)
 static void axs_bf_updateGeometry(CALayer *holder, UIView *view, AxsHoldLaunchConfig *config) {
     CGFloat w = view.bounds.size.width;
     CGFloat h = view.bounds.size.height;
     CGFloat lineWidth = [config axs_holdlaunch_bfFrameWidth];
 
-    CGFloat radius = view.layer.cornerRadius;
+    CGFloat radius = 0;
+    CALayer *presentation = view.layer.presentationLayer;
+    if (presentation != nil) {
+        CGRect pb = presentation.bounds;
+        if (pb.size.width > 20 && pb.size.height > 20) { w = pb.size.width; h = pb.size.height; }
+        radius = presentation.cornerRadius;
+    }
+    if (radius < 1) radius = view.layer.cornerRadius;
     if (radius < 1) radius = [config axs_holdlaunch_splitWindowCornerRadius];
     if (radius < 1) radius = 47.0;
 
@@ -200,8 +215,8 @@ static CALayer *axs_bf_build(UIView *view, AxsHoldLaunchConfig *config) {
     return holder;
 }
 
-// called from the container's own -layoutSubviews: same layout pass as the
-// window resize -> same CA commit -> zero lag
+// called from the container's own -layoutSubviews: same layout pass as a
+// UIKit resize -> same CA commit
 static void axs_bf_layout(UIView *view) {
     axs_bf_ensureMaps();
     axs_bf_prune();
@@ -228,11 +243,75 @@ static void axs_bf_layout(UIView *view) {
         if (holder == nil) return;
         axs_bfHolders[key] = [NSMutableArray arrayWithObject:holder];
         axs_bf_logCount();
+        axs_bf_log(@"frame built: %@ bounds=%@ radius src=layout",
+                   key, NSStringFromCGRect(view.bounds));
     } else {
         axs_bf_updateGeometry(holder, view, config);
     }
     axs_bfLayoutSig[key] = layoutSig;
+    axs_bfTickSig[key] = @"";
 }
+
+// display link fallback: follows layer-driven spring resizes (which never
+// reach UIKit layout) by sampling the container's presentation bounds
+static void axs_bf_tick(void) {
+    @try {
+        axs_bf_ensureMaps();
+        axs_bf_prune();
+
+        AxsHoldLaunchConfig *config = [AxsHoldLaunchConfig axs_holdlaunch_shared];
+        BOOL enabled = [config axs_holdlaunch_bfFrameEnabled];
+
+        for (NSString *key in axs_bfViews) {
+            UIView *view = [axs_bfViews objectForKey:key];
+            if (view == nil) continue;
+
+            if (!enabled) {
+                axs_bf_detach(key);
+                continue;
+            }
+
+            NSMutableArray<CALayer *> *holders = axs_bfHolders[key];
+            CALayer *holder = holders.firstObject;
+            if (holder == nil) continue; // layout hook builds first
+
+            CALayer *pres = view.layer.presentationLayer;
+            CGRect pb = pres != nil ? pres.bounds : view.bounds;
+            CGFloat pr = pres != nil ? pres.cornerRadius : 0;
+            NSString *tickSig = [NSString stringWithFormat:@"%@|r=%.1f",
+                                 NSStringFromCGRect(pb), pr];
+            if (![axs_bfTickSig[key] isEqualToString:tickSig]) {
+                axs_bf_updateGeometry(holder, view, config);
+                axs_bfTickSig[key] = tickSig;
+                axs_bf_log(@"frame tick update: %@ bounds=%@ radius=%.1f",
+                           key, NSStringFromCGRect(pb), pr);
+            }
+        }
+
+        if (axs_bfLink != nil && axs_bfViews.count == 0) {
+            axs_bf_log(@"frame tick idle, display link stopped");
+            [axs_bfLink invalidate];
+            axs_bfLink = nil;
+        }
+    } @catch (NSException *exception) {
+        axs_bf_log(@"frame tick exception: %@", exception);
+    }
+}
+
+@interface AxsBFTickTarget : NSObject
++ (instancetype)shared;
+- (void)axsBFTick;
+@end
+
+@implementation AxsBFTickTarget
++ (instancetype)shared {
+    static AxsBFTickTarget *shared = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ shared = [self new]; });
+    return shared;
+}
+- (void)axsBFTick { axs_bf_tick(); }
+@end
 
 // --- C API (Main.xm hooks + Config) ---
 
@@ -249,30 +328,28 @@ void axs_bf_noteContainer(void *view) {
     [axs_bfViews setObject:v forKey:key];
     axs_bf_log(@"frame container noted: %p bounds=%@",
                view, NSStringFromCGRect(((UIView *)v).bounds));
-    // the container's layoutSubviews fires right after this; the border is
-    // built/updated there (same run loop turn)
-}
-
-// called from the hooked -layoutSubviews of SCFloatingContainerView
-void axs_bf_layoutContainer(void *view) {
-    if (view == NULL) return;
-    id v = (__bridge id)view;
-    if (![v isKindOfClass:[UIView class]]) return;
-    axs_bf_layout(v);
+    axs_bf_engine_wake();
+    // one-shot structure dump for diagnostics: what children does the
+    // container actually have (which one is the visible window)?
+    NSMutableArray *parts = [NSMutableArray array];
+    for (UIView *sub in v.subviews) {
+        [parts addObject:[NSString stringWithFormat:@"%@%@", NSStringFromClass(sub.class), NSStringFromCGRect(sub.frame)]];
+    }
+    axs_bf_log(@"frame children: %@", [parts componentsJoinedByString:@" | "]);
 }
 
 void axs_bf_configChanged(void) {
     if (axs_bfStyleSig == nil) return;
     axs_bf_prune();
-    // drop style + layout signatures so every live container re-lays out
     for (NSString *key in axs_bfViews) {
         UIView *v = [axs_bfViews objectForKey:key];
         if (v == nil) continue;
         [v setNeedsLayout]; // force the hooked -layoutSubviews to run
-        axs_bf_log(@"frame config changed: %p", v);
     }
     [axs_bfStyleSig removeAllObjects];
     [axs_bfLayoutSig removeAllObjects];
+    [axs_bfTickSig removeAllObjects];
+    axs_bf_engine_wake();
 }
 
 } // extern "C"
