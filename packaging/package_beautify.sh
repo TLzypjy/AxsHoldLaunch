@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="2.0.5+beautify.2"
+VERSION="2.0.5+beautify.3"
 BASE_DEB="base/com.susudear.screencore_2.0.5+holdpress.1.deb"
 OUT="out"
 PKG="$OUT/pkg"
@@ -49,7 +49,7 @@ SIZE=$(find "$PKG" -type f -not -path "*/DEBIAN/*" -exec stat -f%z {} + | awk '{
     echo "Package: com.susudear.screencore"
     echo "Name: ScreenCore"
     echo "Description: 分屏而已"
-    echo " 新增分屏设置「美化」分组；本轮实现「光圈外框」：活跃浮窗的彩色跑马灯描边，presentation 层逐帧贴边跟随。"
+    echo " 「光圈外框」修复：钩子延迟重试装载（不再 hook didMoveToWindow），overlay 窗口跟随浮窗 rect 不再全屏。"
     echo "Maintainer: SuSu"
     echo "Author: SuSu"
     echo "Icon: https://repo.susubaby.cn/icons/ScreenCore.png"
@@ -87,6 +87,9 @@ check "dylib has alert message" sh -c "xxd -p '$DYLIB_DIR/AxsHoldLaunch.dylib' |
 check "dylib has ring engine" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring engine start, level=%.0f'"
 check "dylib has ring hooks" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'sc_sessionDidBeginHosting:'"
 check "dylib has ring log path" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'Documents/sc-ring.log'"
+check "dylib has hook result log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring hook name=%s class_exists=%d selector_exists=%d installed=%d'"
+check "dylib has hooks FAILED path" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring hooks FAILED'"
+check "dylib has window frame log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring window frame=%@ level=%.0f'"
 
 # 7) package + verify
 DEB="$OUT/com.susudear.screencore_${VERSION}_iphoneos-arm64.deb"
