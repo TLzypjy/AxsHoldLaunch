@@ -126,10 +126,7 @@ jobs:
           AXS_DYLIB: ${{ github.workspace }}/repack/AxsHoldLaunch.dylib
         run: |
           set -euo pipefail
-          pwd
-          ls -la packaging/ packaging/base/ packaging/overlay/ repack/
-          file packaging/base/*.deb repack/AxsHoldLaunch.dylib || true
-          bash -x packaging/package_beautify.sh 2>&1
+          sh packaging/package_beautify.sh
 
       - name: Upload Beautify Package
         if: matrix.build_variant == 'rootless'

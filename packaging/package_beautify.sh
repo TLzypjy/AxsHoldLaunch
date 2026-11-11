@@ -66,15 +66,24 @@ find "$PKG" -type f -exec chmod 644 {} +
 find "$PKG" -name "*.dylib" -exec chmod 755 {} +
 chmod 755 "$PKG/var/jb/usr/libexec/screencore-userspace-reboot"
 
-# 6) sanity checks before packing
-plutil -p "$DYLIB_DIR/AxsHoldLaunch.plist" | grep -q "com.apple.springboard"
-plutil -p "$DYLIB_DIR/AxsHoldLaunch.plist" | grep -q "com.apple.Preferences"
-plutil -p "$BUNDLE/SplitSettings.plist" | grep -q "splitBeautifyRingFrameEnabled"
-plutil -p "$BUNDLE/SplitSettings.plist" | grep -q "splitBeautifyGlowRadius"
-plutil -p "$BUNDLE/zh-Hans.lproj/SplitSettings.strings" | grep -q "美化"
-plutil -p "$BUNDLE/en.lproj/SplitSettings.strings" | grep -q "Beautify"
-strings -a "$DYLIB_DIR/AxsHoldLaunch.dylib" | grep -q "splitBeautifyRingFrameColor"
-LC_ALL=C grep -q "该功能尚未实现" "$DYLIB_DIR/AxsHoldLaunch.dylib"
+# 6) sanity checks before packing (labeled, so a failure says which one)
+check() {
+    # check <label> <cmd...>
+    label=$1; shift
+    if ! "$@"; then
+        echo "ERROR: sanity check failed: $label" >&2
+        exit 1
+    fi
+}
+check "filter has springboard" sh -c "plutil -p '$DYLIB_DIR/AxsHoldLaunch.plist' | grep -q 'com.apple.springboard'"
+check "filter has preferences" sh -c "plutil -p '$DYLIB_DIR/AxsHoldLaunch.plist' | grep -q 'com.apple.Preferences'"
+check "plist has beautify switches" sh -c "plutil -p '$BUNDLE/SplitSettings.plist' | grep -q 'splitBeautifyRingFrameEnabled'"
+check "plist has beautify sliders" sh -c "plutil -p '$BUNDLE/SplitSettings.plist' | grep -q 'splitBeautifyGlowRadius'"
+check "zh strings localized" sh -c "plutil -p '$BUNDLE/zh-Hans.lproj/SplitSettings.strings' | grep -q '美化'"
+check "en strings localized" sh -c "plutil -p '$BUNDLE/en.lproj/SplitSettings.strings' | grep -q 'Beautify'"
+check "dylib has beautify color key" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'splitBeautifyRingFrameColor'"
+# the alert literal is compiled as UTF-16LE (__ustring), so grep its hex
+check "dylib has alert message" sh -c "xxd -p '$DYLIB_DIR/AxsHoldLaunch.dylib' | tr -d '\n' | grep -q 'e58b9f52fd801a5c2a679e5bb073'"
 
 # 7) package + verify
 DEB="$OUT/com.susudear.screencore_${VERSION}_iphoneos-arm64.deb"
