@@ -143,38 +143,49 @@ static UIView *axs_bf_contentChild(UIView *container) {
     return best;
 }
 
-// geometry from the content child's presentation values: ScreenCore animates
-// the CHILD's bounds on resize (the container follows at the end), and the
-// rounded corners live on the child - the container itself has none
+// geometry from the content child: ScreenCore animates the CHILD's bounds on
+// resize (the container follows at the end), and the rounded corners live on
+// the child - the container itself has none. Position/size follow the child's
+// PRESENTATION frame so layer-driven springs are tracked per display tick.
+// The corner radius deliberately comes from the MODEL layer only: mid-morph
+// the presentation radius interpolates down from huge icon-like values and
+// turned the border into a "capsule".
 static void axs_bf_updateGeometry(CALayer *holder, UIView *view, AxsHoldLaunchConfig *config) {
     CGFloat lineWidth = [config axs_holdlaunch_bfFrameWidth];
     CGFloat cw = view.bounds.size.width;
     CGFloat ch = view.bounds.size.height;
 
     UIView *content = axs_bf_contentChild(view);
+
+    // on-screen rect of the window card, in container coordinates (the child
+    // fills the container when settled, so this equals the centered band then)
+    CGFloat bx = 0;
+    CGFloat by = 0;
     CGFloat w = cw;
     CGFloat h = ch;
-    CGFloat radius = 0;
-
-    UIView *geoSource = content ?: view;
-    CALayer *presentation = geoSource.layer.presentationLayer;
-    if (presentation != nil) {
-        CGRect pb = presentation.bounds;
-        if (pb.size.width > 20 && pb.size.height > 20) { w = pb.size.width; h = pb.size.height; }
-        radius = presentation.cornerRadius;
-        if (radius < 1) radius = geoSource.layer.cornerRadius;
-    } else {
-        w = geoSource.bounds.size.width;
-        h = geoSource.bounds.size.height;
-        radius = geoSource.layer.cornerRadius;
+    if (content != nil) {
+        CALayer *pres = content.layer.presentationLayer;
+        CGRect pf = pres != nil ? pres.frame : content.frame;
+        if (pf.size.width > 20 && pf.size.height > 20
+            && pf.size.width <= cw + 1 && pf.size.height <= ch + 1
+            && pf.origin.x > -1 && pf.origin.y > -1) {
+            bx = pf.origin.x;
+            by = pf.origin.y;
+            w = pf.size.width;
+            h = pf.size.height;
+        }
     }
-    if (w < 40 || h < 40) { w = cw; h = ch; }
+    if (w < 40 || h < 40) { bx = 0; by = 0; w = cw; h = ch; }
+
+    // corners live on the child's MODEL layer (final value, never the morphing
+    // presentation radius); config is the fallback for mask-rounded windows
+    UIView *geoSource = content ?: view;
+    CGFloat radius = geoSource.layer.cornerRadius;
+    if (radius < 1) radius = view.layer.cornerRadius;
     if (radius < 1) radius = [config axs_holdlaunch_splitWindowCornerRadius];
     if (radius < 1) radius = 47.0;
-
-    // band rect centered on the container (the child fills it when settled)
-    CGFloat bx = (cw - w) / 2.0;
-    CGFloat by = (ch - h) / 2.0;
+    CGFloat maxRadius = MIN(w, h) / 2.0;
+    if (radius > maxRadius) radius = maxRadius;
 
     CGFloat diag = hypot(w, h) / 2.0;
     CGFloat holderW = w + diag * 2;
@@ -207,6 +218,16 @@ static BOOL axs_bf_visible(UIView *view) {
     if (view == nil || view.window == nil || view.hidden || view.alpha < 0.05) return NO;
     if (view.bounds.size.width < 40 || view.bounds.size.height < 40) return NO;
     return YES;
+}
+
+// keep the border RESIDENT through transient states (fade, dock, morph,
+// container re-creation gaps) and just hide it - detaching there made the
+// border flicker away during drags and only come back on the next layout
+static void axs_bf_setHidden(NSString *key, BOOL hidden) {
+    NSMutableArray<CALayer *> *holders = axs_bfHolders[key];
+    for (CALayer *l in holders) {
+        if (l.isHidden != hidden) l.hidden = hidden;
+    }
 }
 
 static CALayer *axs_bf_build(UIView *view, AxsHoldLaunchConfig *config) {
@@ -267,8 +288,12 @@ static void axs_bf_layout(UIView *view) {
     BOOL enabled = [config axs_holdlaunch_bfFrameEnabled];
 
     NSString *key = axs_bf_keyFor(view);
-    if (!enabled || !axs_bf_visible(view)) {
-        axs_bf_detach(key); // switch off or container invisible: drop the border
+    if (!enabled) {
+        axs_bf_detach(key); // switch turned off: drop the border
+        return;
+    }
+    if (!axs_bf_visible(view)) {
+        axs_bf_setHidden(key, YES); // transient state: keep it resident, hidden
         return;
     }
 
@@ -280,6 +305,8 @@ static void axs_bf_layout(UIView *view) {
             axs_bf_log(@"frame handover (layout): %@ -> %@", k, key);
         }
     }
+
+    axs_bf_setHidden(key, NO); // visible again: unhide (also covers rebuilds)
 
     NSString *styleSig = axs_bf_styleSig(config);
     NSString *layoutSig = [NSString stringWithFormat:@"%@|%@",
@@ -317,13 +344,25 @@ static void axs_bf_tick(void) {
             UIView *view = [axs_bfViews objectForKey:key];
             if (view == nil) continue;
 
-            // an invisible container/docked item must not carry a border:
-            // docked minis sit at their dock position with alpha=0 and were
-            // the "wandering border" the user saw
-            if (!enabled || !axs_bf_visible(view)) {
+            if (!enabled) {
                 axs_bf_detach(key);
                 continue;
             }
+            // invisible or fading (docked ghost, crossfade): keep the border
+            // resident but hidden - a mid-fade ghost with a live border was
+            // the "two borders at once" the user saw; 0.6 hides the ghost as
+            // soon as the real window becomes the legible one
+            if (!axs_bf_visible(view)) {
+                axs_bf_setHidden(key, YES);
+                continue;
+            }
+            CALayer *containerPres = view.layer.presentationLayer;
+            float opacity = containerPres != nil ? containerPres.opacity : (float)view.alpha;
+            if (opacity < 0.6) {
+                axs_bf_setHidden(key, YES);
+                continue;
+            }
+            axs_bf_setHidden(key, NO);
 
             NSMutableArray<CALayer *> *holders = axs_bfHolders[key];
             CALayer *holder = holders.firstObject;
