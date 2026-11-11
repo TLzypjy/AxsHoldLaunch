@@ -62,6 +62,19 @@ static IMP axs_ring_origClose = NULL;
 static IMP axs_ring_origDock = NULL;
 static IMP axs_ring_origSessionForContainer = NULL;
 
+// 防重入闸：每个钩子独立的线程局部标志。钩子内发的任何消息都可能再次进入
+// 钩子（尤其是 orig 被错误地指回自己时）；重入直接 return，不再调 orig，
+// 同一钩子被拦满 50 次写一条 ring reentry blocked。
+static __thread BOOL axs_ring_reenter_begin = NO;
+static __thread BOOL axs_ring_reenter_close = NO;
+static __thread BOOL axs_ring_reenter_dock = NO;
+static __thread BOOL axs_ring_reenter_forContainer = NO;
+static int axs_ring_reenter_blocked[4] = {0, 0, 0, 0};
+
+// 安装幂等：已装过的选择子绝不重复 hook（重试只补漏，防止 MSHookMessageEx
+// 把我们自己的 IMP 存成 orig，造成 orig -> 自己的无限递归）
+static BOOL axs_ring_hookDone[4] = {NO, NO, NO, NO};
+
 // --- logging: single append-only file --------------------------------------
 
 static void axs_ring_log(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
@@ -436,10 +449,17 @@ static UIView *axs_ring_containerFromObjects(id receiver, id session, NSString *
 }
 
 static void axs_ring_sessionBegin_imp(id self, SEL _cmd, id session) {
-    if (axs_ring_origSessionBegin != NULL) {
-        ((void(*)(id, SEL, id))axs_ring_origSessionBegin)(self, _cmd, session);
+    if (axs_ring_reenter_begin) {
+        if (++axs_ring_reenter_blocked[0] == 50) {
+            axs_ring_log(@"ring reentry blocked: %s", "sc_sessionDidBeginHosting:");
+        }
+        return;
     }
+    axs_ring_reenter_begin = YES;
     @try {
+        if (axs_ring_origSessionBegin != NULL) {
+            ((void(*)(id, SEL, id))axs_ring_origSessionBegin)(self, _cmd, session);
+        }
         dispatch_block_t work = ^{
             if (!axs_ring_hooksInstalled) return;
             axs_ring_ensureMaps();
@@ -473,14 +493,23 @@ static void axs_ring_sessionBegin_imp(id self, SEL _cmd, id session) {
         if ([NSThread isMainThread]) work(); else dispatch_async(dispatch_get_main_queue(), work);
     } @catch (NSException *exception) {
         axs_ring_log(@"ring session begin exception: %@", exception);
+    } @finally {
+        axs_ring_reenter_begin = NO;
     }
 }
 
 static void axs_ring_close_imp(id self, SEL _cmd, id session) {
-    if (axs_ring_origClose != NULL) {
-        ((void(*)(id, SEL, id))axs_ring_origClose)(self, _cmd, session);
+    if (axs_ring_reenter_close) {
+        if (++axs_ring_reenter_blocked[1] == 50) {
+            axs_ring_log(@"ring reentry blocked: %s", "sc_closeSession:");
+        }
+        return;
     }
+    axs_ring_reenter_close = YES;
     @try {
+        if (axs_ring_origClose != NULL) {
+            ((void(*)(id, SEL, id))axs_ring_origClose)(self, _cmd, session);
+        }
         void *s = session != nil ? (__bridge void *)session : NULL;
         dispatch_block_t work = ^{
             if (!axs_ring_hooksInstalled) return;
@@ -500,14 +529,23 @@ static void axs_ring_close_imp(id self, SEL _cmd, id session) {
         if ([NSThread isMainThread]) work(); else dispatch_async(dispatch_get_main_queue(), work);
     } @catch (NSException *exception) {
         axs_ring_log(@"ring session close exception: %@", exception);
+    } @finally {
+        axs_ring_reenter_close = NO;
     }
 }
 
 static void axs_ring_dock_imp(id self, SEL _cmd, id session, long corner) {
-    if (axs_ring_origDock != NULL) {
-        ((void(*)(id, SEL, id, long))axs_ring_origDock)(self, _cmd, session, corner);
+    if (axs_ring_reenter_dock) {
+        if (++axs_ring_reenter_blocked[2] == 50) {
+            axs_ring_log(@"ring reentry blocked: %s", "sc_dockSession:fromCorner:");
+        }
+        return;
     }
+    axs_ring_reenter_dock = YES;
     @try {
+        if (axs_ring_origDock != NULL) {
+            ((void(*)(id, SEL, id, long))axs_ring_origDock)(self, _cmd, session, corner);
+        }
         void *s = session != nil ? (__bridge void *)session : NULL;
         dispatch_block_t work = ^{
             if (!axs_ring_hooksInstalled) return;
@@ -537,14 +575,23 @@ static void axs_ring_dock_imp(id self, SEL _cmd, id session, long corner) {
         if ([NSThread isMainThread]) work(); else dispatch_async(dispatch_get_main_queue(), work);
     } @catch (NSException *exception) {
         axs_ring_log(@"ring dock exception: %@", exception);
+    } @finally {
+        axs_ring_reenter_dock = NO;
     }
 }
 
 static id axs_ring_sessionForContainer_imp(id self, SEL _cmd, id container) {
-    id result = axs_ring_origSessionForContainer != NULL
-        ? ((id(*)(id, SEL, id))axs_ring_origSessionForContainer)(self, _cmd, container)
-        : nil;
+    if (axs_ring_reenter_forContainer) {
+        if (++axs_ring_reenter_blocked[3] == 50) {
+            axs_ring_log(@"ring reentry blocked: %s", "sc_sessionForContainerView:");
+        }
+        return nil;
+    }
+    axs_ring_reenter_forContainer = YES;
     @try {
+        id result = axs_ring_origSessionForContainer != NULL
+            ? ((id(*)(id, SEL, id))axs_ring_origSessionForContainer)(self, _cmd, container)
+            : nil;
         if ([container isKindOfClass:[UIView class]] && result != nil) {
             void *s = (__bridge void *)result;
             UIView *v = (UIView *)container;
@@ -559,14 +606,20 @@ static id axs_ring_sessionForContainer_imp(id self, SEL _cmd, id container) {
                 }
             });
         }
-    } @catch (NSException *exception) { }
-    return result;
+        return result;
+    } @catch (NSException *exception) {
+        return nil;
+    } @finally {
+        axs_ring_reenter_forContainer = NO;
+    }
 }
 
 // --- deferred hook installation ----------------------------------------------
 
 // hook every class declaring the selector; the sc_* names are ScreenCore
-// private, so the scan cannot reach unrelated classes
+// private, so the scan cannot reach unrelated classes. Classes whose current
+// IMP is already our replacement are skipped - a second MSHookMessageEx would
+// store our own IMP as orig and make the orig call recurse into itself.
 static NSUInteger axs_ring_hookSelector(SEL selector, IMP replacement, IMP *original) {
     NSUInteger hooked = 0;
     unsigned int count = 0;
@@ -576,6 +629,7 @@ static NSUInteger axs_ring_hookSelector(SEL selector, IMP replacement, IMP *orig
         Class cls = classes[i];
         Method m = class_getInstanceMethod(cls, selector);
         if (m == nil) continue;
+        if (method_getImplementation(m) == replacement) continue; // already hooked here
         MSHookMessageEx(cls, selector, replacement, original);
         hooked++;
     }
@@ -584,7 +638,8 @@ static NSUInteger axs_ring_hookSelector(SEL selector, IMP replacement, IMP *orig
 }
 
 // ring hook name=%s class_exists=%d selector_exists=%d installed=%d
-static int axs_ring_tryHook(const char *name, SEL selector, IMP replacement, IMP *original) {
+static int axs_ring_tryHook(int slot, const char *name, SEL selector, IMP replacement, IMP *original) {
+    if (axs_ring_hookDone[slot]) return 1; // 已装过：重试只补漏，绝不重复 hook
     int classExists = (objc_getClass("SCFloatingContainerView") != nil) ? 1 : 0;
     int selectorExists = 0;
     unsigned int count = 0;
@@ -597,7 +652,10 @@ static int axs_ring_tryHook(const char *name, SEL selector, IMP replacement, IMP
     }
     int installed = 0;
     if (selectorExists) {
-        installed = (axs_ring_hookSelector(selector, replacement, original) > 0) ? 1 : 0;
+        if (axs_ring_hookSelector(selector, replacement, original) > 0) {
+            axs_ring_hookDone[slot] = YES;
+            installed = 1;
+        }
     }
     axs_ring_log(@"ring hook name=%s class_exists=%d selector_exists=%d installed=%d",
                  name, classExists, selectorExists, installed);
@@ -611,10 +669,10 @@ static void axs_ring_attemptInstall(void) {
     axs_ring_installAttempts++;
     axs_ring_ensureMaps();
 
-    int begin = axs_ring_tryHook("sc_sessionDidBeginHosting:", @selector(sc_sessionDidBeginHosting:), (IMP)axs_ring_sessionBegin_imp, &axs_ring_origSessionBegin);
-    int close = axs_ring_tryHook("sc_closeSession:", @selector(sc_closeSession:), (IMP)axs_ring_close_imp, &axs_ring_origClose);
-    int dock = axs_ring_tryHook("sc_dockSession:fromCorner:", @selector(sc_dockSession:fromCorner:), (IMP)axs_ring_dock_imp, &axs_ring_origDock);
-    int forContainer = axs_ring_tryHook("sc_sessionForContainerView:", @selector(sc_sessionForContainerView:), (IMP)axs_ring_sessionForContainer_imp, &axs_ring_origSessionForContainer);
+    int begin = axs_ring_tryHook(0, "sc_sessionDidBeginHosting:", @selector(sc_sessionDidBeginHosting:), (IMP)axs_ring_sessionBegin_imp, &axs_ring_origSessionBegin);
+    int close = axs_ring_tryHook(1, "sc_closeSession:", @selector(sc_closeSession:), (IMP)axs_ring_close_imp, &axs_ring_origClose);
+    int dock = axs_ring_tryHook(2, "sc_dockSession:fromCorner:", @selector(sc_dockSession:fromCorner:), (IMP)axs_ring_dock_imp, &axs_ring_origDock);
+    int forContainer = axs_ring_tryHook(3, "sc_sessionForContainerView:", @selector(sc_sessionForContainerView:), (IMP)axs_ring_sessionForContainer_imp, &axs_ring_origSessionForContainer);
 
     if (begin && close && dock && forContainer) {
         axs_ring_hooksInstalled = YES;
