@@ -26,6 +26,7 @@ static NSMutableDictionary<NSString *, NSMutableArray<CALayer *> *> *axs_bfHolde
 static NSMutableDictionary<NSString *, NSString *> *axs_bfStyleSig = nil;
 static NSMutableDictionary<NSString *, NSString *> *axs_bfLayoutSig = nil;
 static NSMutableDictionary<NSString *, NSString *> *axs_bfTickSig = nil;
+static NSMutableDictionary<NSString *, NSString *> *axs_bfGateSig = nil;
 
 static void axs_bf_log(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 static void axs_bf_log(NSString *format, ...) {
@@ -77,6 +78,7 @@ static void axs_bf_ensureMaps(void) {
     axs_bfStyleSig = [NSMutableDictionary new];
     axs_bfLayoutSig = [NSMutableDictionary new];
     axs_bfTickSig = [NSMutableDictionary new];
+    axs_bfGateSig = [NSMutableDictionary new];
 }
 
 static void axs_bf_logCount(void) {
@@ -91,6 +93,7 @@ static void axs_bf_detach(NSString *key) {
         [axs_bfStyleSig removeObjectForKey:key];
         [axs_bfLayoutSig removeObjectForKey:key];
         [axs_bfTickSig removeObjectForKey:key];
+        [axs_bfGateSig removeObjectForKey:key];
         axs_bf_logCount();
     }
 }
@@ -213,9 +216,12 @@ static void axs_bf_updateGeometry(CALayer *holder, UIView *view, AxsHoldLaunchCo
 
 // visibility gate: an invisible container/docked item must NOT carry a
 // border (invisible docked minis at their dock position were the "wandering
-// border" the user saw)
+// border" the user saw). NOTE: deliberately NO window-membership check -
+// ScreenCore keeps the container in the window during gestures, but a
+// removed-but-still-alive container simply isn't rendered, so gating on
+// window only caused the border to vanish mid-gesture for no visual reason.
 static BOOL axs_bf_visible(UIView *view) {
-    if (view == nil || view.window == nil || view.hidden || view.alpha < 0.05) return NO;
+    if (view == nil || view.hidden || view.alpha < 0.05) return NO;
     if (view.bounds.size.width < 40 || view.bounds.size.height < 40) return NO;
     return YES;
 }
@@ -344,6 +350,22 @@ static void axs_bf_tick(void) {
             UIView *view = [axs_bfViews objectForKey:key];
             if (view == nil) continue;
 
+            BOOL vis = axs_bf_visible(view);
+            CALayer *containerPres = view.layer.presentationLayer;
+            float opacity = containerPres != nil ? containerPres.opacity : (float)view.alpha;
+            BOOL show = enabled && vis && opacity >= 0.6;
+            // diagnostics: log ONLY on gate-state transitions so a gesture
+            // that misbehaves shows up as a few lines, not a flood
+            NSString *gateSig = [NSString stringWithFormat:@"%d|%d|%.2f|%d",
+                                 enabled ? 1 : 0, vis ? 1 : 0, opacity,
+                                 view.window != nil ? 1 : 0];
+            if (![axs_bfGateSig[key] isEqualToString:gateSig]) {
+                axs_bf_log(@"frame gate %@ enabled=%d visible=%d opacity=%.2f inWindow=%d -> %@",
+                           key, enabled ? 1 : 0, vis ? 1 : 0, opacity,
+                           view.window != nil ? 1 : 0, show ? @"show" : @"hidden");
+                axs_bfGateSig[key] = gateSig;
+            }
+
             if (!enabled) {
                 axs_bf_detach(key);
                 continue;
@@ -352,13 +374,7 @@ static void axs_bf_tick(void) {
             // resident but hidden - a mid-fade ghost with a live border was
             // the "two borders at once" the user saw; 0.6 hides the ghost as
             // soon as the real window becomes the legible one
-            if (!axs_bf_visible(view)) {
-                axs_bf_setHidden(key, YES);
-                continue;
-            }
-            CALayer *containerPres = view.layer.presentationLayer;
-            float opacity = containerPres != nil ? containerPres.opacity : (float)view.alpha;
-            if (opacity < 0.6) {
+            if (!show) {
                 axs_bf_setHidden(key, YES);
                 continue;
             }

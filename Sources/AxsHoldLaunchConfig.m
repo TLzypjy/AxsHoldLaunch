@@ -78,6 +78,17 @@ static void axs_holdlaunch_theirPrefsDidChange(CFNotificationCenterRef center, v
         NSString *theirPath = axs_holdlaunch_theirPreferencesPath();
         their = theirPath.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:theirPath] : nil;
     }
+    // 粘性合并：拖动/捏合期间 ScreenCore 会高频保存，域读取可能瞬时缺键
+    // （包括我们注入的美化键），一缺键开关就会读成关、边框当场消失。
+    // 新值优先；新读里缺失的键沿用上一次快照。设置页改值时新读里一定带着
+    // 新值，不受影响。
+    if ([their isKindOfClass:[NSDictionary class]] && their.count > 0 && oldTheir.count > 0) {
+        NSMutableDictionary *merged = [oldTheir mutableCopy];
+        [their enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+            [merged setObject:obj forKey:key];
+        }];
+        their = merged;
+    }
     self.theirSnapshot = [their isKindOfClass:[NSDictionary class]] ? their : @{};
     if (![oldTheir isEqualToDictionary:[self axs_holdlaunch_theirSnapshot]]) {
         axs_bf_configChanged();
