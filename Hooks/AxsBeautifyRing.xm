@@ -23,6 +23,8 @@
 
 #define AXS_RING_LOG_PATH @"/var/mobile/Documents/sc-ring.log"
 
+static void axs_ring_tick(void);
+
 @interface AXSRingFrame : NSObject
 @property (nonatomic, assign) void *session;
 @property (nonatomic, weak) UIView *container;
@@ -59,8 +61,6 @@ static IMP axs_ring_origSessionBegin = NULL;
 static IMP axs_ring_origClose = NULL;
 static IMP axs_ring_origDock = NULL;
 static IMP axs_ring_origSessionForContainer = NULL;
-
-static void axs_ring_tick(void);
 
 // --- logging: single append-only file --------------------------------------
 
