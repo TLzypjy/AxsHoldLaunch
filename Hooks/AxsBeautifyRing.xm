@@ -685,7 +685,7 @@ static void axs_ring_tick(void) {
 
 - (void)didMoveToWindow {
     %orig;
-    axs_ring_containerDidMove(self);
+    axs_ring_containerDidMove((UIView *)self);
 }
 
 %end
