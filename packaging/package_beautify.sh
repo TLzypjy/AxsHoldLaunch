@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="2.0.5+beautify.1"
+VERSION="2.0.5+beautify.2"
 BASE_DEB="base/com.susudear.screencore_2.0.5+holdpress.1.deb"
 OUT="out"
 PKG="$OUT/pkg"
@@ -49,7 +49,7 @@ SIZE=$(find "$PKG" -type f -not -path "*/DEBIAN/*" -exec stat -f%z {} + | awk '{
     echo "Package: com.susudear.screencore"
     echo "Name: ScreenCore"
     echo "Description: 分屏而已"
-    echo " 在分屏设置的「启动」与「外观」之间新增「美化」分组（本轮仅显示面板，不实现功能）。"
+    echo " 新增分屏设置「美化」分组；本轮实现「光圈外框」：活跃浮窗的彩色跑马灯描边，presentation 层逐帧贴边跟随。"
     echo "Maintainer: SuSu"
     echo "Author: SuSu"
     echo "Icon: https://repo.susubaby.cn/icons/ScreenCore.png"
@@ -84,6 +84,9 @@ check "en strings localized" sh -c "plutil -p '$BUNDLE/en.lproj/SplitSettings.st
 check "dylib has beautify color key" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'splitBeautifyRingFrameColor'"
 # the alert literal is compiled as UTF-16LE (__ustring), so grep its hex
 check "dylib has alert message" sh -c "xxd -p '$DYLIB_DIR/AxsHoldLaunch.dylib' | tr -d '\n' | grep -q 'e58b9f52fd801a5c2a679e5bb073'"
+check "dylib has ring engine" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring engine start, level=%.0f'"
+check "dylib has ring hooks" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'sc_sessionDidBeginHosting:'"
+check "dylib has ring log path" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'Documents/sc-ring.log'"
 
 # 7) package + verify
 DEB="$OUT/com.susudear.screencore_${VERSION}_iphoneos-arm64.deb"
