@@ -278,6 +278,8 @@ static NSString * const AxsHoldLaunchKeyRingColor = @"splitWindowRingFrameColor"
 static NSString * const AxsHoldLaunchKeyGlowColor = @"splitWindowGlowColor";
 static NSString * const AxsHoldLaunchKeyInnerColor = @"splitWindowRingInnerColor";
 static NSString * const AxsHoldLaunchKeyExclude = @"splitWindowRingExcludedApplications";
+static NSString * const AxsHoldLaunchKeyBeautifyRingColor = @"splitBeautifyRingFrameColor";
+static NSString * const AxsHoldLaunchKeyBeautifyGlowColor = @"splitBeautifyGlowColor";
 
 static IMP axs_ringPage_origSpecifiers = NULL;
 static IMP axs_ringPage_origCellForRow = NULL;
@@ -323,7 +325,25 @@ static NSUInteger axs_ring_page_excludeCount(void) {
 static BOOL axs_ring_page_isColorKey(NSString *key) {
     return [key isEqualToString:AxsHoldLaunchKeyRingColor]
         || [key isEqualToString:AxsHoldLaunchKeyGlowColor]
-        || [key isEqualToString:AxsHoldLaunchKeyInnerColor];
+        || [key isEqualToString:AxsHoldLaunchKeyInnerColor]
+        || [key isEqualToString:AxsHoldLaunchKeyBeautifyRingColor]
+        || [key isEqualToString:AxsHoldLaunchKeyBeautifyGlowColor];
+}
+
+// 美化分组的颜色行本轮只做显示：点按弹提示，不接颜色选择器、不写配置。
+static BOOL axs_ring_page_isBeautifyColorKey(NSString *key) {
+    return [key isEqualToString:AxsHoldLaunchKeyBeautifyRingColor]
+        || [key isEqualToString:AxsHoldLaunchKeyBeautifyGlowColor];
+}
+
+static void axs_holdlaunch_presentNotImplementedAlert(id self) {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示"
+                                                                   message:@"该功能尚未实现"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定"
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 static NSString *axs_ring_page_colorTitle(id self, NSString *key) {
@@ -345,6 +365,17 @@ static double axs_ring_page_snap(double value, double min, double max, double st
     if (v < min) v = min;
     if (v > max) v = max;
     return v;
+}
+
+// rows may carry an explicit "step" property (e.g. 0.5 for the border-width
+// slider); otherwise the range decides (<=1 -> 0.01, else 1.0)
+static double axs_ring_page_stepForSpec(PSSpecifier *spec, double min, double max) {
+    id stepValue = [spec propertyForKey:@"step"];
+    if ([stepValue isKindOfClass:[NSNumber class]]) {
+        double s = [stepValue doubleValue];
+        if (s > 0.0 && s <= (max - min)) return s;
+    }
+    return axs_ring_page_stepFor(min, max);
 }
 
 static NSArray *axs_ringPage_specifiers_imp(id self, SEL _cmd) {
@@ -443,7 +474,7 @@ static UITableViewCell *axs_ringPage_sliderCell(id self, UITableView *tableView,
     double min = [[spec propertyForKey:@"min"] doubleValue];
     double max = [[spec propertyForKey:@"max"] doubleValue];
     if (max <= min) max = min + 1;
-    double step = axs_ring_page_stepFor(min, max);
+    double step = axs_ring_page_stepForSpec(spec, min, max);
 
     id read = [self respondsToSelector:@selector(readPreferenceValue:)]
         ? [self readPreferenceValue:spec] : nil;
@@ -616,6 +647,10 @@ static void axs_ringPage_didSelect_imp(id self, SEL _cmd, id tableView, id index
         }
         NSString *key = [spec propertyForKey:@"key"];
         if (axs_ring_page_isColorKey(key)) {
+            if (axs_ring_page_isBeautifyColorKey(key)) {
+                axs_holdlaunch_presentNotImplementedAlert(self);
+                return;
+            }
             axs_holdlaunch_presentColorPicker(self, axs_ring_page_colorTitle(self, key), key);
             return;
         }
@@ -626,7 +661,7 @@ static void axs_ringPage_didSelect_imp(id self, SEL _cmd, id tableView, id index
 static void axs_ringPage_applySliderValue(id self, UISlider *slider, double value) {
     PSSpecifier *spec = objc_getAssociatedObject(slider, @selector(axsRingSpec));
     if (spec == nil) return;
-    double step = axs_ring_page_stepFor(slider.minimumValue, slider.maximumValue);
+    double step = axs_ring_page_stepForSpec(spec, slider.minimumValue, slider.maximumValue);
     value = axs_ring_page_snap(value, slider.minimumValue, slider.maximumValue, step);
     slider.value = value;
 
@@ -647,20 +682,26 @@ static void axs_ringPage_sliderChanged_imp(id self, SEL _cmd, UISlider *sender) 
 static void axs_ringPage_minus_imp(id self, SEL _cmd, UIButton *sender) {
     UISlider *slider = (UISlider *)[(UIView *)sender.superview viewWithTag:103];
     if (slider == nil) return;
-    double step = axs_ring_page_stepFor(slider.minimumValue, slider.maximumValue);
+    PSSpecifier *spec = objc_getAssociatedObject(sender, @selector(axsRingSpec));
+    double step = axs_ring_page_stepForSpec(spec, slider.minimumValue, slider.maximumValue);
     axs_ringPage_applySliderValue(self, slider, slider.value - step);
 }
 
 static void axs_ringPage_plus_imp(id self, SEL _cmd, UIButton *sender) {
     UISlider *slider = (UISlider *)[(UIView *)sender.superview viewWithTag:103];
     if (slider == nil) return;
-    double step = axs_ring_page_stepFor(slider.minimumValue, slider.maximumValue);
+    PSSpecifier *spec = objc_getAssociatedObject(sender, @selector(axsRingSpec));
+    double step = axs_ring_page_stepForSpec(spec, slider.minimumValue, slider.maximumValue);
     axs_ringPage_applySliderValue(self, slider, slider.value + step);
 }
 
 static void axs_ringPage_colorTapped_imp(id self, SEL _cmd, UIButton *sender) {
     NSString *key = objc_getAssociatedObject(sender, @selector(axsRingColorKey));
     if (key.length == 0) return;
+    if (axs_ring_page_isBeautifyColorKey(key)) {
+        axs_holdlaunch_presentNotImplementedAlert(self);
+        return;
+    }
     axs_holdlaunch_presentColorPicker(self, axs_ring_page_colorTitle(self, key), key);
 }
 

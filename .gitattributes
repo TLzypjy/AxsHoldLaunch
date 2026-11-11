@@ -5,3 +5,7 @@
 *.xm text eol=lf
 *.mk text eol=lf
 Makefile text eol=lf
+# binary plists / deb must never be eol-normalized (a stripped 0x0D corrupts them)
+packaging/base/*.deb -text
+packaging/overlay/SplitSettings.plist -text
+packaging/overlay/*.lproj/*.strings -text

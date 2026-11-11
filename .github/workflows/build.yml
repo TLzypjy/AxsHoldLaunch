@@ -120,6 +120,22 @@ jobs:
           find "$EXTRACT" -name "AxsHoldLaunch.plist" -exec cp {} ./repack/ \;
           ls -la ./repack
 
+      - name: Package 2.0.5+beautify.1 (dpkg-deb)
+        if: matrix.build_variant == 'rootless'
+        env:
+          AXS_DYLIB: ${{ github.workspace }}/repack/AxsHoldLaunch.dylib
+        run: |
+          set -euo pipefail
+          sh packaging/package_beautify.sh
+
+      - name: Upload Beautify Package
+        if: matrix.build_variant == 'rootless'
+        uses: actions/upload-artifact@v4
+        with:
+          name: beautify-package
+          path: packaging/out/*.deb
+          if-no-files-found: error
+
       - name: Upload Repack Artifact
         uses: actions/upload-artifact@v4
         with:
