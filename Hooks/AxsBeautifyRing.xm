@@ -266,15 +266,22 @@ static CAGradientLayer *axs_ring_makeGradient(BOOL custom, UIColor *color) {
 }
 
 static void axs_ring_rebuildGradient(AXSRingFrame *f, BOOL custom, UIColor *color) {
-    CGRect frame = f.gradient.frame;
+    // 渐变层要旋转：frame 取容器 bounds 的外接正方形（边长 = hypot(w,h)，居中），
+    // 旋转时四角不裁、颜色无断层；渐变层自身不带遮罩（遮罩在容器上，不随旋转）
+    CGFloat side = hypot(f.holder.bounds.size.width, f.holder.bounds.size.height);
+    if (side < 1.0) side = 1.0;
     [f.gradient removeFromSuperlayer];
     f.gradient = axs_ring_makeGradient(custom, color);
-    f.gradient.frame = frame;
-    f.gradient.mask = f.mask; // 遮罩直接挂渐变层（TXT 一.2 结构）
+    f.gradient.frame = CGRectMake((f.holder.bounds.size.width - side) / 2.0,
+                                  (f.holder.bounds.size.height - side) / 2.0, side, side);
     [f.holder addSublayer:f.gradient];
 }
 
 static void axs_ring_buildLayers(AXSRingFrame *f, BOOL custom, UIColor *color) {
+    // 三层结构：
+    //   containerLayer      矩形 = ringRect，不旋转；mask 设在它身上
+    //   ├─ gradientLayer    旋转动画只加在这里（无遮罩），frame = 外接正方形
+    //   maskShapeLayer      不旋转，frame = containerLayer.bounds，圆角矩形描边
     CALayer *holder = [CALayer layer];
     holder.masksToBounds = NO;
     holder.backgroundColor = [UIColor clearColor].CGColor;
@@ -282,7 +289,7 @@ static void axs_ring_buildLayers(AXSRingFrame *f, BOOL custom, UIColor *color) {
     CAShapeLayer *mask = [CAShapeLayer layer];
     mask.fillColor = nil;                    // 只用于遮罩
     mask.strokeColor = [UIColor whiteColor].CGColor;
-    // 遮罩不作为可见子层，只挂到渐变层的 mask 上（一层遮罩、一套坐标系）
+    holder.mask = mask;                      // 遮罩设在容器上，不在渐变层上
 
     f.holder = holder;
     f.mask = mask;
@@ -333,9 +340,24 @@ static CGRect axs_ring_cardScreenRect(UIView *content, UIWindow *host) {
     return rect; // screen coords
 }
 
+// 当前视觉缩放系数：沿 presentation 链累乘各层 frame/bounds 比。
+// 浮窗缩放是容器 layer 上的 transform 弹簧，视觉圆角 = 配置圆角 × 缩放系数。
+static CGFloat axs_ring_totalScale(UIView *content) {
+    CALayer *pres = content.layer.presentationLayer ?: content.layer;
+    CGFloat scale = 1.0;
+    CALayer *l = pres;
+    while (l != nil) {
+        CGFloat bw = l.bounds.size.width;
+        if (bw > 0.5) scale *= l.frame.size.width / bw;
+        l = l.superlayer;
+    }
+    if (!(scale > 0.01)) scale = 1.0;
+    return scale;
+}
+
 static void axs_ring_applyGeometry(AXSRingFrame *f, CGSize cardSize, double width, double radius) {
-    // 一套坐标系：gradient.frame = ringRect（卡片本地 (0,0,W,H)），
-    // mask.frame = gradient.bounds，path 只用渐变层内部坐标（无绝对坐标）。
+    // 一套坐标系：containerLayer.frame = ringRect（卡片本地 (0,0,W,H)），
+    // mask.frame = containerLayer.bounds，path 只用容器内部坐标（无绝对坐标）。
     double lineWidth = width;
     if (lineWidth < 0.5) lineWidth = 0.5;
     CGRect ringRect = CGRectMake(0, 0, cardSize.width, cardSize.height);
@@ -343,13 +365,17 @@ static void axs_ring_applyGeometry(AXSRingFrame *f, CGSize cardSize, double widt
     // path/frame 变化必须禁掉隐式动画，否则环在缩放时慢半拍拖在后面
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    f.gradient.frame = ringRect;
-    f.mask.frame = f.gradient.bounds; // 关键：遮罩原点归 (0,0)，与渐变同坐标系
-    CGRect r = CGRectInset(f.gradient.bounds, lineWidth / 2.0, lineWidth / 2.0);
+    f.holder.frame = ringRect;                     // 容器矩形，圆角不参与旋转
+    f.mask.frame = f.holder.bounds;                // 遮罩不旋转，永远水平垂直
+    CGRect r = CGRectInset(f.holder.bounds, lineWidth / 2.0, lineWidth / 2.0);
     double pathRadius = axs_ring_clamp(radius, 0.0, MIN(r.size.width, r.size.height) / 2.0);
     UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:pathRadius];
     f.mask.path = p.CGPath;
-    f.mask.lineWidth = lineWidth;
+    f.mask.lineWidth = lineWidth;                  // 描边粗细固定屏幕点值，不随缩放
+    // 渐变层只更新 frame（容器 bounds 的外接正方形，居中），不动它的旋转动画
+    CGFloat side = hypot(cardSize.width, cardSize.height);
+    f.gradient.frame = CGRectMake((cardSize.width - side) / 2.0,
+                                  (cardSize.height - side) / 2.0, side, side);
     [CATransaction commit];
 }
 
@@ -747,8 +773,9 @@ static void axs_ring_tick(void) {
 
             BOOL custom = axs_ring_customColor();
             UIColor *color = axs_ring_color();
-            double width = axs_ring_thickness();     // 每帧重读
-            double radius = axs_ring_cornerRadius(); // 每帧重读
+            double width = axs_ring_thickness();     // 每帧重读（固定屏幕点值，不随缩放）
+            double radius = axs_ring_cornerRadius()  // 每帧重读
+                          * (double)axs_ring_totalScale(content); // 视觉圆角 = 配置圆角 × 当前缩放
             NSInteger mode = custom ? 1 : 0;
 
             if (f.holder == nil) {

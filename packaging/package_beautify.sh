@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="2.0.5+beautify.6"
+VERSION="2.0.5+beautify.7"
 BASE_DEB="base/com.susudear.screencore_2.0.5+holdpress.1.deb"
 OUT="out"
 PKG="$OUT/pkg"
@@ -49,7 +49,7 @@ SIZE=$(find "$PKG" -type f -not -path "*/DEBIAN/*" -exec stat -f%z {} + | awk '{
     echo "Package: com.susudear.screencore"
     echo "Name: ScreenCore"
     echo "Description: 分屏而已"
-    echo " 环修复：overlay 窗口 hitTest/pointInside 全拒绝（浮窗恢复可点），遮罩与渐变统一坐标系（环为一圈），同宿主复用单环。"
+    echo " 环修复：旋转只作用于无遮罩的渐变层（环形状恒为正圆角矩形），圆角随缩放系数实时换算。"
     echo "Maintainer: SuSu"
     echo "Author: SuSu"
     echo "Icon: https://repo.susubaby.cn/icons/ScreenCore.png"
