@@ -51,6 +51,15 @@ static void axs_ring_tick(void);
 - (void)axsRingTick { axs_ring_tick(); }
 @end
 
+// overlay 窗口子类：hitTest/pointInside 一律拒绝，杜绝吞掉浮窗的触摸。
+// 只设 userInteractionEnabled=NO 在 UIWindow 层级不够稳，两个都必须覆写。
+@interface AXSRingOverlayWindow : UIWindow
+@end
+@implementation AXSRingOverlayWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event { return nil; }
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event { return NO; }
+@end
+
 static UIWindow *axs_ring_window = nil;
 static CADisplayLink *axs_ring_link = nil;
 static NSMutableDictionary<NSString *, AXSRingFrame *> *axs_ring_frames = nil;
@@ -187,14 +196,14 @@ static UIWindow *axs_ring_ensureWindow(UIWindow *hostWindow, CGRect cardRect) {
         } @catch (NSException *exception) { }
         if (scene == nil) return nil;
 
-        UIWindow *w = [[UIWindow alloc] initWithWindowScene:scene];
+        AXSRingOverlayWindow *w = [[AXSRingOverlayWindow alloc] initWithWindowScene:scene];
         w.backgroundColor = [UIColor clearColor]; // 立即清掉默认背景，防露白
         w.opaque = NO;
         w.userInteractionEnabled = NO;   // 不拦截触摸、不参与手势判定
         w.clipsToBounds = NO;
         w.frame = cardRect;              // = 浮窗 rect，不许全屏
         w.windowLevel = hostWindow.windowLevel + 1; // 只比宿主高 1
-        w.hidden = NO;
+        w.hidden = NO;                   // 绝不 makeKeyAndVisible
         axs_ring_window = w;
         axs_ring_log(@"ring engine start, level=%.0f", w.windowLevel);
         axs_ring_log(@"ring window frame=%@ level=%.0f", NSStringFromCGRect(w.frame), w.windowLevel);
@@ -261,6 +270,7 @@ static void axs_ring_rebuildGradient(AXSRingFrame *f, BOOL custom, UIColor *colo
     [f.gradient removeFromSuperlayer];
     f.gradient = axs_ring_makeGradient(custom, color);
     f.gradient.frame = frame;
+    f.gradient.mask = f.mask; // 遮罩直接挂渐变层（TXT 一.2 结构）
     [f.holder addSublayer:f.gradient];
 }
 
@@ -272,7 +282,7 @@ static void axs_ring_buildLayers(AXSRingFrame *f, BOOL custom, UIColor *color) {
     CAShapeLayer *mask = [CAShapeLayer layer];
     mask.fillColor = nil;                    // 只用于遮罩
     mask.strokeColor = [UIColor whiteColor].CGColor;
-    holder.mask = mask;                      // 遮罩只有这一层
+    // 遮罩不作为可见子层，只挂到渐变层的 mask 上（一层遮罩、一套坐标系）
 
     f.holder = holder;
     f.mask = mask;
@@ -324,28 +334,22 @@ static CGRect axs_ring_cardScreenRect(UIView *content, UIWindow *host) {
 }
 
 static void axs_ring_applyGeometry(AXSRingFrame *f, CGSize cardSize, double width, double radius) {
-    // overlay window frame == card rect on screen, so the ring lives in
-    // card-local coordinates: rect = (0, 0, w, h)
-    double w = width;
-    if (w < 0.5) w = 0.5;
-    CGRect cardRect = CGRectMake(0, 0, cardSize.width, cardSize.height);
+    // 一套坐标系：gradient.frame = ringRect（卡片本地 (0,0,W,H)），
+    // mask.frame = gradient.bounds，path 只用渐变层内部坐标（无绝对坐标）。
+    double lineWidth = width;
+    if (lineWidth < 0.5) lineWidth = 0.5;
+    CGRect ringRect = CGRectMake(0, 0, cardSize.width, cardSize.height);
 
-    // gradient frame = card rect 外扩 thickness; path rect 内缩 lineWidth/2
-    // (stroke straddles the path edge, so the band lies fully inside the edge)
-    CGRect gradFrame = CGRectInset(cardRect, -w, -w);
-    CGRect pathRect = CGRectInset(cardRect, w / 2.0, w / 2.0);
-    double pathRadius = axs_ring_clamp(radius - w / 2.0, 0.0, MIN(pathRect.size.width, pathRect.size.height) / 2.0);
-
-    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:pathRect cornerRadius:pathRadius];
-
-    // path/frame changes must not pick up implicit 0.25s animations, or the
-    // ring trails half a beat behind every resize
+    // path/frame 变化必须禁掉隐式动画，否则环在缩放时慢半拍拖在后面
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    f.gradient.frame = gradFrame;
-    f.mask.frame = gradFrame;
-    f.mask.lineWidth = w;
-    f.mask.path = path.CGPath;
+    f.gradient.frame = ringRect;
+    f.mask.frame = f.gradient.bounds; // 关键：遮罩原点归 (0,0)，与渐变同坐标系
+    CGRect r = CGRectInset(f.gradient.bounds, lineWidth / 2.0, lineWidth / 2.0);
+    double pathRadius = axs_ring_clamp(radius, 0.0, MIN(r.size.width, r.size.height) / 2.0);
+    UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:pathRadius];
+    f.mask.path = p.CGPath;
+    f.mask.lineWidth = lineWidth;
     [CATransaction commit];
 }
 
@@ -735,18 +739,10 @@ static void axs_ring_tick(void) {
             f.lastVisibleAt = now;
             f.hostWindow = f.container.window;
 
-            if (axs_ring_window == nil
-                && axs_ring_ensureWindow(f.container.window, cardRect) == nil) {
+            // 挂起的会话不画环，也绝不参与环的认领（ring dock ignored 正常）
+            if (f.docked) {
+                if (f.holder != nil && !f.holder.hidden) f.holder.hidden = YES;
                 continue;
-            }
-
-            // overlay frame follows the card's screen rect; the ring then
-            // lives in card-local coordinates
-            if (!CGRectEqualToRect(axs_ring_window.frame, cardRect)) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                axs_ring_window.frame = cardRect;
-                [CATransaction commit];
             }
 
             BOOL custom = axs_ring_customColor();
@@ -756,11 +752,37 @@ static void axs_ring_tick(void) {
             NSInteger mode = custom ? 1 : 0;
 
             if (f.holder == nil) {
-                axs_ring_buildLayers(f, custom, color);
-                f.lastSize = CGSizeZero;
-                f.lastMode = mode;
-                f.lastWidth = (CGFloat)width;
-                f.lastRadius = (CGFloat)radius;
+                // 一个宿主窗口只允许一个环：attach 前先看环是否已在别的会话
+                // 手上，有就转移复用并更新（旧会话通常是刚挂起/被顶掉的），
+                // 绝不新建第二层描边
+                AXSRingFrame *owner = nil;
+                for (AXSRingFrame *cand in axs_ring_frames.allValues) {
+                    if (cand != f && cand.holder != nil) { owner = cand; break; }
+                }
+                if (owner != nil) {
+                    f.holder = owner.holder;
+                    f.gradient = owner.gradient;
+                    f.mask = owner.mask;
+                    owner.holder = nil; owner.gradient = nil; owner.mask = nil;
+                    owner.lastSize = CGSizeZero;
+                    owner.attachLogged = NO;
+                    f.attachLogged = NO;
+                    f.lastSize = CGSizeZero;
+                    f.lastMode = -1; // 强制按当前模式重刷渐变与几何
+                    axs_ring_log(@"ring handover: session=%p -> %p host=%p",
+                                 owner.session, f.session, f.hostWindow);
+                }
+                if (axs_ring_window == nil
+                    && axs_ring_ensureWindow(f.container.window, cardRect) == nil) {
+                    continue;
+                }
+                if (f.holder == nil) {
+                    axs_ring_buildLayers(f, custom, color);
+                    f.lastSize = CGSizeZero;
+                    f.lastMode = mode;
+                    f.lastWidth = (CGFloat)width;
+                    f.lastRadius = (CGFloat)radius;
+                }
                 if (!f.attachLogged) {
                     f.attachLogged = YES;
                     axs_ring_log(@"ring attach: session=%p host=%p rect=%@",
@@ -768,11 +790,15 @@ static void axs_ring_tick(void) {
                 }
             }
 
-            if (f.docked) {
-                if (!f.holder.hidden) f.holder.hidden = YES;
-                continue;
-            }
             if (f.holder.hidden) f.holder.hidden = NO;
+
+            // overlay frame 只跟随持有环的这张卡片；环在窗口内即卡片本地坐标
+            if (!CGRectEqualToRect(axs_ring_window.frame, cardRect)) {
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                axs_ring_window.frame = cardRect;
+                [CATransaction commit];
+            }
 
             BOOL styleChanged = (f.lastMode != mode)
                              || (f.lastWidth != (CGFloat)width)
