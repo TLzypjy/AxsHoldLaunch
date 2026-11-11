@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="2.0.5+beautify.4"
+VERSION="2.0.5+beautify.5"
 BASE_DEB="base/com.susudear.screencore_2.0.5+holdpress.1.deb"
 OUT="out"
 PKG="$OUT/pkg"
@@ -49,7 +49,7 @@ SIZE=$(find "$PKG" -type f -not -path "*/DEBIAN/*" -exec stat -f%z {} + | awk '{
     echo "Package: com.susudear.screencore"
     echo "Name: ScreenCore"
     echo "Description: 分屏而已"
-    echo " 「光圈外框」崩溃修复：钩子安装改幂等（重试不再重复 hook），每钩子加防重入闸。"
+    echo " 光圈外框运行正常；holdpress 主日志迁移至 /var/mobile/Documents/AxsHoldLaunch.log，与 sc-ring.log 同目录。"
     echo "Maintainer: SuSu"
     echo "Author: SuSu"
     echo "Icon: https://repo.susubaby.cn/icons/ScreenCore.png"
@@ -91,6 +91,8 @@ check "dylib has hook result log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dy
 check "dylib has hooks FAILED path" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring hooks FAILED'"
 check "dylib has window frame log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring window frame=%@ level=%.0f'"
 check "dylib has reentry gate" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring reentry blocked: %s'"
+check "dylib has holdpress log in Documents" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'Documents/AxsHoldLaunch.log'"
+check "dylib has no Caches log path left" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'Caches/AxsHoldLaunch.log') -eq 0"
 
 # 7) package + verify
 DEB="$OUT/com.susudear.screencore_${VERSION}_iphoneos-arm64.deb"
