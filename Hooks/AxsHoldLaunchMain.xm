@@ -34,7 +34,7 @@ static void axs_holdlaunch_log(NSString *format, ...) {
     va_end(args);
     NSLog(@"[AxsHoldLaunch] %@", message);
 
-    NSString *path = @"/var/mobile/Library/Caches/AxsHoldLaunch.log";
+    NSString *path = @"/var/mobile/Documents/AxsHoldLaunch.log";
     @try {
         NSFileManager *manager = [NSFileManager defaultManager];
         NSDictionary *attributes = [manager attributesOfItemAtPath:path error:nil];
