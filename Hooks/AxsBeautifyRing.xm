@@ -2,6 +2,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "AxsHoldLaunchConfig.h"
+#import "AxsHoldLaunchPrivate.h"
 
 // ---------------------------------------------------------------------------
 // 美化 · 光圈外框 (ring frame, beautify.2)
@@ -24,20 +25,6 @@
 
 #define AXS_RING_LOG_PATH @"/var/mobile/Documents/sc-ring.log"
 
-static UIWindow *axs_ring_window = nil;
-static CADisplayLink *axs_ring_link = nil;
-static NSMutableDictionary<NSString *, AXSRingFrame *> *axs_ring_frames = nil;
-static void *axs_ring_recentSession = NULL;
-static double axs_ring_recentSessionAt = 0;
-static BOOL axs_ring_hooksInstalled = NO;
-
-static IMP axs_ring_origSessionBegin = NULL;
-static IMP axs_ring_origClose = NULL;
-static IMP axs_ring_origDock = NULL;
-static IMP axs_ring_origSessionForContainer = NULL;
-
-static void axs_ring_tick(void);
-
 @interface AXSRingFrame : NSObject
 @property (nonatomic, weak) UIView *container;
 @property (nonatomic, weak) UIWindow *hostWindow;
@@ -55,6 +42,20 @@ static void axs_ring_tick(void);
 @end
 @implementation AXSRingFrame
 @end
+
+static UIWindow *axs_ring_window = nil;
+static CADisplayLink *axs_ring_link = nil;
+static NSMutableDictionary<NSString *, AXSRingFrame *> *axs_ring_frames = nil;
+static void *axs_ring_recentSession = NULL;
+static double axs_ring_recentSessionAt = 0;
+static BOOL axs_ring_hooksInstalled = NO;
+
+static IMP axs_ring_origSessionBegin = NULL;
+static IMP axs_ring_origClose = NULL;
+static IMP axs_ring_origDock = NULL;
+static IMP axs_ring_origSessionForContainer = NULL;
+
+static void axs_ring_tick(void);
 
 @interface AXSRingTickTarget : NSObject
 - (void)axsRingTick;
@@ -308,7 +309,7 @@ static void axs_ring_applyGeometry(AXSRingFrame *f, CGRect rect, double width, d
     CGRect gradFrame = CGRectMake(rect.origin.x - w, rect.origin.y - w,
                                   rect.size.width + 2 * w, rect.size.height + 2 * w);
     CGRect bandRect = CGRectMake(w, w, rect.size.width, rect.size.height); // rect in gradFrame space
-    CGRect pathRect = CGRectInset(bandRect, w / 2.0);
+    CGRect pathRect = CGRectInset(bandRect, w / 2.0, w / 2.0);
     double pathRadius = axs_ring_clamp(radius - w / 2.0, 0.0, MIN(pathRect.size.width, pathRect.size.height) / 2.0);
 
     UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:pathRect cornerRadius:pathRadius];
@@ -345,7 +346,7 @@ static void axs_ring_idleEngine(void) {
 }
 
 static void axs_ring_stopAll(void) {
-    for (NSString *key in [NSArray arrayWithArray:axs_ring_frames]) {
+    for (NSString *key in axs_ring_frames.allKeys) {
         axs_ring_detach(key, @"disabled");
     }
     if (axs_ring_link != nil) {
@@ -599,7 +600,7 @@ static void axs_ring_tick(void) {
         if (axs_ring_frames == nil) return;
 
         // prune containers that went away entirely
-        for (NSString *key in [NSArray arrayWithArray:axs_ring_frames]) {
+        for (NSString *key in axs_ring_frames.allKeys) {
             AXSRingFrame *f = axs_ring_frames[key];
             if (f.container == nil) axs_ring_detach(key, @"container dealloc");
         }
@@ -618,7 +619,7 @@ static void axs_ring_tick(void) {
         double radius = axs_ring_cornerRadius();
         double now = [[NSDate date] timeIntervalSince1970];
 
-        for (NSString *key in [NSArray arrayWithArray:axs_ring_frames]) {
+        for (NSString *key in axs_ring_frames.allKeys) {
             AXSRingFrame *f = axs_ring_frames[key];
             UIView *container = f.container;
 
