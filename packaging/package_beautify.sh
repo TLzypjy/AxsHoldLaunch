@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="2.0.5+beautify.10"
+VERSION="2.0.5+beautify.11"
 BASE_DEB="base/com.susudear.screencore_2.0.5+holdpress.1.deb"
 OUT="out"
 PKG="$OUT/pkg"
@@ -49,7 +49,7 @@ SIZE=$(find "$PKG" -type f -not -path "*/DEBIAN/*" -exec stat -f%z {} + | awk '{
     echo "Package: com.susudear.screencore"
     echo "Name: ScreenCore"
     echo "Description: 分屏而已"
-    echo " 环修复：纯图层化（删除 AXSRingFrame 状态类），圆角改读 ScreenCore 真实来源（preferred/effective/mask/config，attach 一次），跑马灯改 colors 关键帧。"
+    echo " 环修复：attach/resume 运行时层级体检（ring probe: 层级/手势/圆角归属），圆角沿对象链取真实来源，纯图层无视图命中。"
     echo "Maintainer: SuSu"
     echo "Author: SuSu"
     echo "Icon: https://repo.susubaby.cn/icons/ScreenCore.png"
@@ -92,6 +92,9 @@ check "dylib has ring log path" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dyli
 check "dylib has hook result log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring hook name=%s class_exists=%d selector_exists=%d installed=%d'"
 check "dylib has hooks FAILED path" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring hooks FAILED'"
 check "dylib has sublayer attach log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring attach: session=%p containerLayer=%p bounds=%@ radiusSource='"
+check "dylib has probe container" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring probe: container class=%@'"
+check "dylib has probe radiusOwner" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring probe: radiusOwner class=%@ selector=%@ value=%.2f'"
+check "dylib has probe gestures" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring probe: gestures class=%@ count=%lu'"
 check "dylib has radius log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring radius: source=%@ host=%.1f'"
 check "dylib has suspend log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring suspend: session=%p'"
 check "dylib has resume log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring resume: session=%p container=%p'"

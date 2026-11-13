@@ -295,56 +295,137 @@ static CGFloat axs_ring_radiusFromPath(CGPathRef path) {
     return ctx.radius;
 }
 
-static CGFloat axs_ring_resolveRadius(UIView *container, NSString **sourceOut) {
-    // 1. preferredCornerRadius（respondsToSelector 校验，返回值为基础类型才调）
-    if ([container respondsToSelector:@selector(preferredCornerRadius)]) {
-        SEL sel = @selector(preferredCornerRadius);
-        NSMethodSignature *sig = [container methodSignatureForSelector:sel];
-        const char *rt = sig ? [sig getArgumentTypeAtIndex:0] : "";
-        if (strcmp(rt, "d") == 0 || strcmp(rt, "f") == 0) {
-            double v = ((double(*)(id, SEL))[container methodForSelector:sel])(container, sel);
-            if (v > 0.5) { *sourceOut = @"preferred"; return (CGFloat)v; }
+// 读 ObjC ivar（仅接受 UIView 值）：_interactionOverlayView 等私有 ivar 的安全读取
+static UIView *axs_ring_ivarView(id obj, const char *name) {
+    if (obj == nil) return nil;
+    @try {
+        Ivar ivar = class_getInstanceVariable(obj_getClass(obj), name);
+        if (ivar == nil) return nil;
+        id v = object_getIvar(obj, ivar);
+        return [v isKindOfClass:[UIView class]] ? v : nil;
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+// TXT 五.1 圆角归属链：容器 → interactionOverlayView（ivar）→ UIView 祖先链。
+// 对链上每个对象依次探测三个 selector（均做 respondsToSelector + 签名校验）。
+// log=YES 时打 ring probe: radiusOwner 行（只在 attach / resume 传 YES）。
+static NSArray *axs_ring_radiusChain(UIView *container) {
+    NSMutableArray *chain = [NSMutableArray array];
+    [chain addObject:container];
+    UIView *overlay = axs_ring_ivarView(container, "_interactionOverlayView");
+    if (overlay != nil) [chain addObject:overlay];
+    UIView *ancestor = container.superview;
+    int hops = 0;
+    while (ancestor != nil && hops < 8) {
+        [chain addObject:ancestor];
+        ancestor = ancestor.superview;
+        hops++;
+    }
+    return chain;
+}
+
+static CGFloat axs_ring_resolveRadiusChain(UIView *container, NSString **sourceOut, CGPathRef *pathOut, BOOL log) {
+    if (pathOut != nil) *pathOut = nil;
+    SEL selPreferred = @selector(preferredCornerRadius);
+    SEL selEffective = @selector(sc_effectiveCornerRadius);
+    SEL selMask = @selector(interactiveMaskLayer);
+
+    NSArray *chain = axs_ring_radiusChain(container);
+    for (id obj in chain) {
+        if (obj == nil || obj == [NSNull null]) continue;
+
+        // a) preferredCornerRadius（基础类型返回值才调用，防 ARC 错 retain）
+        if ([obj respondsToSelector:selPreferred]) {
+            NSMethodSignature *sig = [obj methodSignatureForSelector:selPreferred];
+            const char *rt = sig ? [sig getArgumentTypeAtIndex:0] : "";
+            if (strcmp(rt, "d") == 0 || strcmp(rt, "f") == 0) {
+                double v = ((double(*)(id, SEL))[obj methodForSelector:selPreferred])(obj, selPreferred);
+                if (v > 0.5) {
+                    if (log) axs_ring_log(@"ring probe: radiusOwner class=%@ selector=%@ value=%.2f",
+                                          NSStringFromClass([obj class]), "preferredCornerRadius", v);
+                    *sourceOut = @"preferred";
+                    return (CGFloat)v;
+                }
+            }
+        }
+        // b) sc_effectiveCornerRadius
+        if ([obj respondsToSelector:selEffective]) {
+            NSMethodSignature *sig = [obj methodSignatureForSelector:selEffective];
+            const char *rt = sig ? [sig getArgumentTypeAtIndex:0] : "";
+            if (strcmp(rt, "d") == 0 || strcmp(rt, "f") == 0) {
+                double v = ((double(*)(id, SEL))[obj methodForSelector:selEffective])(obj, selEffective);
+                if (v > 0.5) {
+                    if (log) axs_ring_log(@"ring probe: radiusOwner class=%@ selector=%@ value=%.2f",
+                                          NSStringFromClass([obj class]), "sc_effectiveCornerRadius", v);
+                    *sourceOut = @"effective";
+                    return (CGFloat)v;
+                }
+            }
+        }
+        // c) interactiveMaskLayer（返回 CAShapeLayer 且带 path）
+        if ([obj respondsToSelector:selMask]) {
+            NSMethodSignature *sig = [obj methodSignatureForSelector:selMask];
+            if (sig.numberOfArguments == 2 && strcmp([sig getArgumentTypeAtIndex:0], "@") == 0) {
+                id v = ((id(*)(id, SEL))[obj methodForSelector:selMask])(obj, selMask);
+                if ([v isKindOfClass:[CAShapeLayer class]] && ((CAShapeLayer *)v).path != nil) {
+                    CGPathRef p = ((CAShapeLayer *)v).path;
+                    if (log) {
+                        CGRect bb = CGPathGetBoundingBox(p);
+                        axs_ring_log(@"ring probe: radiusOwner class=%@ selector=%@ value=%.2f path=%@",
+                                     NSStringFromClass([obj class]), "interactiveMaskLayer",
+                                     axs_ring_radiusFromPath(p), NSStringFromCGRect(bb));
+                    }
+                    if (pathOut != nil) *pathOut = CGPathRetain(p);
+                    *sourceOut = @"mask";
+                    return axs_ring_radiusFromPath(p);
+                }
+            }
         }
     }
-    // 2. manager 的 sc_effectiveCornerRadius（manager = sc_sessionDidBeginHosting:
-    //    的接收者，session begin 时记录）
-    id mgr = axs_ring_managerRef;
-    if (mgr != nil && [mgr respondsToSelector:@selector(sc_effectiveCornerRadius)]) {
-        SEL sel = @selector(sc_effectiveCornerRadius);
-        NSMethodSignature *sig = [mgr methodSignatureForSelector:sel];
-        const char *rt = sig ? [sig getArgumentTypeAtIndex:0] : "";
-        if (strcmp(rt, "d") == 0 || strcmp(rt, "f") == 0) {
-            double v = ((double(*)(id, SEL))[mgr methodForSelector:sel])(mgr, sel);
-            if (v > 0.5) { *sourceOut = @"effective"; return (CGFloat)v; }
-        }
-    }
-    // 3. interactiveMaskLayer.path：环的遮罩路径直接复用宿主几何（最稳）
-    CALayer *maskLayer = nil;
-    if ([container respondsToSelector:@selector(interactiveMaskLayer)]) {
-        SEL sel = @selector(interactiveMaskLayer);
-        NSMethodSignature *sig = [container methodSignatureForSelector:sel];
-        if (sig.numberOfArguments == 2 && strcmp([sig getArgumentTypeAtIndex:0], "@") == 0) {
-            maskLayer = ((id(*)(id, SEL))[container methodForSelector:sel])(container, sel);
-        }
-    }
-    if (maskLayer == nil && [container.layer respondsToSelector:@selector(interactiveMaskLayer)]) {
-        SEL sel = @selector(interactiveMaskLayer);
-        NSMethodSignature *sig = [container.layer methodSignatureForSelector:sel];
-        if (sig.numberOfArguments == 2 && strcmp([sig getArgumentTypeAtIndex:0], "@") == 0) {
-            maskLayer = ((id(*)(id, SEL))[container.layer methodForSelector:sel])(container.layer, sel);
-        }
-    }
-    if ([maskLayer isKindOfClass:[CAShapeLayer class]]) {
-        CGPathRef p = ((CAShapeLayer *)maskLayer).path;
-        if (p != nil) {
-            axs_ring_hostMaskPath = CGPathRetain(p);
-            *sourceOut = @"mask";
-            return axs_ring_radiusFromPath(p);
-        }
-    }
-    // 4. 配置兜底
+    // 都取不到：配置兜底
+    if (log) axs_ring_log(@"ring probe: radiusOwner none (config fallback)");
     *sourceOut = @"config";
     return (CGFloat)axs_ring_configRadius();
+}
+
+// attach / resume 时一次性运行时体检（TXT 三）：容器本体、两层视图层级、
+// 手势统计、圆角归属。禁止在每帧/DisplayLink 里调用。
+static void axs_ring_probeContainer(UIView *container) {
+    @try {
+        // 1) 容器本体
+        axs_ring_log(@"ring probe: container class=%@ frame=%@ bounds=%@ layerCorner=%.2f masksToBounds=%d",
+                     NSStringFromClass(container.class), NSStringFromCGRect(container.frame),
+                     NSStringFromCGRect(container.bounds),
+                     container.layer.cornerRadius, container.layer.masksToBounds ? 1 : 0);
+
+        // 2) 视图层级（两层）+ 手势统计
+        UIView *overlay = axs_ring_ivarView(container, "_interactionOverlayView");
+        NSMutableArray *views = [NSMutableArray array];
+        if (overlay != nil) [views addObject:overlay];
+        for (UIView *sub in container.subviews) {
+            [views addObject:sub];
+            for (UIView *sub2 in sub.subviews) [views addObject:sub2];
+        }
+        for (UIView *v in views) {
+            axs_ring_log(@"ring probe: view class=%@ frame=%@ userInteraction=%d subviews=%d",
+                         NSStringFromClass(v.class), NSStringFromCGRect(v.frame),
+                         v.userInteractionEnabled ? 1 : 0, (unsigned)v.subviews.count);
+        }
+        axs_ring_log(@"ring probe: gestures class=%@ count=%lu",
+                     NSStringFromClass(container.class), (unsigned long)container.gestureRecognizers.count);
+        for (UIView *v in views) {
+            axs_ring_log(@"ring probe: gestures class=%@ count=%lu",
+                         NSStringFromClass(v.class), (unsigned long)v.gestureRecognizers.count);
+        }
+
+        // 3) 圆角归属（带日志）
+        NSString *source = nil;
+        axs_ring_resolveRadiusChain(container, &source, nil, YES);
+    } @catch (NSException *exception) {
+        axs_ring_log(@"ring probe exception: %@", exception);
+    }
 }
 
 // --- KVO / 体检共用的几何同步（圆角用 attach 时解析的值，不重读） -------------
@@ -359,8 +440,14 @@ static void axs_ring_syncRing(void) {
         axs_ring_ring.frame = axs_ring_container.layer.bounds;
         axs_ring_shape.frame = axs_ring_ring.bounds;
         if (axs_ring_hostMaskPath != nil) {
-            // mask 来源：环的遮罩路径直接复用宿主几何（圆角必然一致）
-            axs_ring_shape.path = axs_ring_hostMaskPath;
+            // mask 来源（TXT 五.4）：由宿主 CGPath 按边框厚度内缩生成，
+            // 四角几何与窗口一致
+            CGRect bb = CGPathGetBoundingBox(axs_ring_hostMaskPath);
+            CGRect r = CGRectInset(bb, lineWidth, lineWidth);
+            CGFloat pr = axs_ring_radiusFromPath(axs_ring_hostMaskPath);
+            double pathRadius = axs_ring_clamp(pr, 0.0, MIN(r.size.width, r.size.height) / 2.0);
+            UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:pathRadius];
+            axs_ring_shape.path = p.CGPath;
             axs_ring_shape.lineWidth = lineWidth;
         } else {
             CGRect r = CGRectInset(axs_ring_ring.bounds, lineWidth / 2.0, lineWidth / 2.0);
@@ -413,8 +500,11 @@ static void axs_ring_attachRing(void) {
         axs_ring_gradient = grad;
         [axs_ring_container.layer addSublayer:ring];
 
+        // TXT 三：attach/resume 时一次性运行时体检（层级 + 手势 + 圆角归属）
+        axs_ring_probeContainer(axs_ring_container);
+
         NSString *source = nil;
-        axs_ring_baseRadius = axs_ring_resolveRadius(axs_ring_container, &source);
+        axs_ring_baseRadius = axs_ring_resolveRadiusChain(axs_ring_container, &source, &axs_ring_hostMaskPath, YES);
         axs_ring_radiusSource = source;
 
         @try {
@@ -681,7 +771,9 @@ static void axs_ring_reconcile(void) {
         if (axs_ring_suspended) {
             axs_ring_suspended = NO;
             axs_ring_lastAliveAt = now;
-            axs_ring_log(@"ring resume: session=%p container=%p", axs_ring_activeSession, container);
+            // enabled 归因（TXT 六.4）：回前台时环是否处于启用状态一并落日志
+            axs_ring_log(@"ring resume: session=%p container=%p enabled=%d",
+                         axs_ring_activeSession, container, enabled ? 1 : 0);
         }
         axs_ring_lastAliveAt = now;
 
@@ -690,7 +782,7 @@ static void axs_ring_reconcile(void) {
             return;
         }
         if (axs_ring_ring == nil) {
-            axs_ring_attachRing(); // 回前台重建的容器：完整 attach，不复用旧 layer
+            axs_ring_attachRing(); // 回前台重建的容器：完整 attach（含体检），不复用旧 layer
         } else if (axs_ring_ring.hidden) {
             axs_ring_ring.hidden = NO;
         }
