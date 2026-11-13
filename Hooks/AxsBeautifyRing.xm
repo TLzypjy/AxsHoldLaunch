@@ -6,92 +6,113 @@
 #import "AxsHoldLaunchPrivate.h"
 
 // ---------------------------------------------------------------------------
-// 美化 · 光圈外框 (ring frame, beautify.8) — 图层附着方案
+// 美化 · 光圈外框 (ring frame, beautify.10) — 纯图层 + ScreenCore 真实圆角
 //
-// beautify.7 lesson: chasing the floating card from an overlay UIWindow with
-// presentation frames cannot work - the card is scaled by a TRANSFORM spring
-// on the container's layer, so bounds-based rects never match the visual
-// rect, and the overlay window covers the card's gesture hot zones.
+// beautify.9 lesson: ScreenCore animates the container's model cornerRadius
+// continuously (sc_updateCornerRadiusAndShadowPath), so re-reading it per KVO
+// fire made the ring's corners oscillate (503 log lines) and never match the
+// card. Also, the real corner radius does NOT live on layer.cornerRadius:
 //
-// This version has NO overlay window and NO display link:
-//   - the ring is a sublayer of the container's own layer (the layer that
-//     carries the transform spring), so drag/scale/spring move the ring
-//     physically - it cannot detach or trail;
-//   - CALayer does no hit testing, so the fullscreen/close/corner gesture
-//     zones work immediately;
-//   - ring corner radius = the host's own cornerRadius (container -> largest
-//     content child -> config fallback), scaled by the same transform;
-//   - KVO on the container layer's bounds/cornerRadius re-syncs frame+path;
-//   - a 1s health check detaches rings whose host left the hierarchy and
-//     re-attaches when it comes back; handover removes the old host's ring
-//     before attaching the new one (never both).
+//   preferredCornerRadius -> sc_effectiveCornerRadius -> interactiveMaskLayer
+//   -> splitWindowCornerRadius fallback   (resolved ONCE at attach, KVO kept
+//   for preferredCornerRadius / bounds changes only)
+//
+// The ring is a pure CALayer subtree attached to container.layer (the layer
+// carrying the transform spring): drag/scale/spring move it physically. No
+// overlay window, no display link, no UIView, no transform animations - the
+// marquee runs as a colors keyframe animation on the conic gradient.
 //
 //   container.layer
 //     ├─ (existing content)
-//     └─ ringContainer          frame = container bounds; mask = shapeLayer
-//          ├─ gradientLayer     rotation animation only here (no mask),
-//          │                    frame = circumscribed square of ringContainer
-//          (shapeLayer          ringContainer.mask; not a rendered sublayer)
+//     └─ ringContainer           frame = container bounds; mask = shapeLayer
+//          ├─ gradientLayer      conic rainbow; marquee = colors keyframes
+//          (shapeLayer           ringContainer.mask; not a rendered sublayer)
 // ---------------------------------------------------------------------------
 
 #define AXS_RING_LOG_PATH @"/var/mobile/Documents/sc-ring.log"
 
-static void axs_ring_syncRing(id frame);
+static void axs_ring_syncRing(void);
 static void axs_ring_reconcile(void);
+static void axs_ring_removeRing(NSString *reason);
+static void axs_ring_attachRing(void);
 
-@class AXSRingFrame;
-static void axs_ring_removeRing(AXSRingFrame *frame, NSString *reason);
-
-@interface AXSRingHealthTarget : NSObject
-- (void)axsRingTick;
-@end
-@implementation AXSRingHealthTarget
-- (void)axsRingTick { axs_ring_reconcile(); }
-@end
-
-@interface AXSRingFrame : NSObject
-@property (nonatomic, assign) void *session;
-@property (nonatomic, weak) UIView *container;
-@property (nonatomic, strong) CALayer *ringContainer;   // 挂在 container.layer 上的环
-@property (nonatomic, strong) CAGradientLayer *gradient;
-@property (nonatomic, strong) CAShapeLayer *shape;      // ringContainer.mask
-@property (nonatomic, assign) BOOL kvoInstalled;
-@property (nonatomic, assign) BOOL docked;
-@property (nonatomic, assign) BOOL attachLogged;
-@property (nonatomic, assign) BOOL inHierarchy;
-@property (nonatomic, assign) CGFloat lastRadiusLogged;
-@property (nonatomic, assign) CGFloat lastPathRadius;
-@property (nonatomic, assign) double lastAliveAt;
-@end
-@implementation AXSRingFrame
-- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
-    if ([keyPath isEqualToString:@"bounds"] || [keyPath isEqualToString:@"cornerRadius"]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ axs_ring_syncRing(self); });
-    }
-}
-@end
-
-static NSMutableDictionary<NSString *, AXSRingFrame *> *axs_ring_frames = nil;
-static BOOL axs_ring_hooksInstalled = NO;
-static int axs_ring_installAttempts = 0;
+// 活跃环状态：全局单环（attach 前先摘别的宿主上的环，禁止两边同时存在）。
+// 不设任何 UIView、不设状态类——纯 C 静态量 + 图层。
+static void *axs_ring_activeSession = NULL;
+static __weak UIView *axs_ring_container = nil;
+static CALayer *axs_ring_ring = nil;              // ringContainer
+static CAGradientLayer *axs_ring_gradient = nil;
+static CAShapeLayer *axs_ring_shape = nil;        // ringContainer.mask
+static CGFloat axs_ring_baseRadius = 0;           // attach 时解析一次
+static NSString *axs_ring_radiusSource = nil;     // preferred/effective/mask/config
+static CGPathRef axs_ring_hostMaskPath = nil;     // mask 来源时复用的宿主几何
+static BOOL axs_ring_kvoInstalled = NO;
+static BOOL axs_ring_docked = NO;
+static BOOL axs_ring_attachLogged = NO;
+static BOOL axs_ring_inHierarchy = NO;
+static BOOL axs_ring_suspended = NO;
+static CGFloat axs_ring_lastLoggedRadius = -1;
 static NSTimer *axs_ring_healthTimer = nil;
+
+// pending：sessionBegin 没解析出容器时挂起，等 sc_sessionForContainerView:
+// 的被动配对填充（0.5s 体检里认领，5s 过期）
+static void *axs_ring_pendingSession = NULL;
+static __weak UIView *axs_ring_pendingContainer = nil;
+static double axs_ring_pendingAt = 0;
+
+// manager（sc_sessionDidBeginHosting: 的接收者，日志确认是
+// SCFloatingSceneManager）：sc_effectiveCornerRadius 圆角来源的候选对象
+static __weak id axs_ring_managerRef = nil;
+static double axs_ring_lastAliveAt = 0;
+
+// 容器解析（沿用 beautify.6 起验证过的三级探测）
+static UIView *axs_ring_containerFromObjects(id receiver, id session, NSString **howOut) {
+    Class containerClass = objc_getClass("SCFloatingContainerView");
+    if (containerClass != nil && [receiver isKindOfClass:containerClass]) {
+        *howOut = @"receiver";
+        return (UIView *)receiver;
+    }
+    if (session != nil && containerClass != nil && [session isKindOfClass:containerClass]) {
+        *howOut = @"argument";
+        return (UIView *)session;
+    }
+    id probeTarget = (session != nil) ? session : receiver;
+    if (probeTarget == nil) return nil;
+    NSArray<NSString *> *names = @[@"containerView", @"container", @"hostContainerView",
+                                   @"hostingContainerView", @"contentView"];
+    for (NSString *name in names) {
+        SEL sel = NSSelectorFromString(name);
+        if (![probeTarget respondsToSelector:sel]) continue;
+        NSMethodSignature *sig = [probeTarget methodSignatureForSelector:sel];
+        if (sig.numberOfArguments != 2) continue; // self + _cmd only (a getter)
+        if (strcmp([sig getArgumentTypeAtIndex:0], "@") != 0) continue; // returns object
+        id v = ((id(*)(id, SEL))[probeTarget methodForSelector:sel])(probeTarget, sel);
+        if ([v isKindOfClass:[UIView class]]) {
+            *howOut = [NSString stringWithFormat:@"probe:%@", name];
+            return (UIView *)v;
+        }
+    }
+    return nil;
+}
 
 static IMP axs_ring_origSessionBegin = NULL;
 static IMP axs_ring_origClose = NULL;
 static IMP axs_ring_origDock = NULL;
 static IMP axs_ring_origSessionForContainer = NULL;
 
+static BOOL axs_ring_hooksInstalled = NO;
+static int axs_ring_installAttempts = 0;
+
 // 防重入闸：每个钩子独立的线程局部标志。钩子内发的任何消息都可能再次进入
-// 钩子（尤其是 orig 被错误地指回自己时）；重入直接 return，不再调 orig，
-// 同一钩子被拦满 50 次写一条 ring reentry blocked。
+// 钩子；重入直接 return，不再调 orig，同一钩子被拦满 50 次写一条日志。
 static __thread BOOL axs_ring_reenter_begin = NO;
 static __thread BOOL axs_ring_reenter_close = NO;
 static __thread BOOL axs_ring_reenter_dock = NO;
 static __thread BOOL axs_ring_reenter_forContainer = NO;
 static int axs_ring_reenter_blocked[4] = {0, 0, 0, 0};
 
-// 安装幂等：已装过的选择子绝不重复 hook（重试只补漏，防止 MSHookMessageEx
-// 把我们自己的 IMP 存成 orig，造成 orig -> 自己的无限递归）
+// 安装幂等：已装过的选择子绝不重复 hook（防止 MSHookMessageEx 把自己的
+// IMP 存成 orig，造成 orig -> 自己的无限递归）
 static BOOL axs_ring_hookDone[4] = {NO, NO, NO, NO};
 
 // --- logging: single append-only file --------------------------------------
@@ -143,7 +164,7 @@ static BOOL axs_ring_customColor(void) {
     return [v isKindOfClass:[NSNumber class]] ? [v boolValue] : NO;
 }
 
-static double axs_ring_cornerRadius(void) {
+static double axs_ring_configRadius(void) {
     id v = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:@"splitWindowCornerRadius" defaultValue:@8.0];
     double r = [v isKindOfClass:[NSNumber class]] ? [v doubleValue] : 8.0;
     return axs_ring_clamp(r, 0.0, 60.0);
@@ -172,39 +193,26 @@ static UIColor *axs_ring_color(void) {
                              [UIColor colorWithRed:0.576 green:0.890 blue:0.992 alpha:1.0]);
 }
 
-// --- maps -------------------------------------------------------------------
+// --- KVO observer（单例；环状态在全局静态量里，不设状态类） ------------------
 
-static NSString *axs_ring_keyForSession(void *session) {
-    if (session != NULL) return [NSString stringWithFormat:@"s:%p", session];
-    return nil;
+@interface AXSRingKVOObserver : NSObject
+@end
+@implementation AXSRingKVOObserver
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
+    // 仅 preferredCornerRadius / bounds 两个 keyPath 会挂进来（TXT 四：
+    // 禁止每帧重读圆角；只在 attach 与这些变化时更新）
+    dispatch_async(dispatch_get_main_queue(), ^{ axs_ring_syncRing(); });
 }
+@end
+static AXSRingKVOObserver *axs_ring_kvoObserver = nil;
 
-static NSString *axs_ring_keyForContainer(UIView *container) {
-    return [NSString stringWithFormat:@"c:%p", container];
-}
-
-static void axs_ring_ensureMaps(void) {
-    if (axs_ring_frames != nil) return;
-    axs_ring_frames = [NSMutableDictionary new];
-}
-
-// --- ring layers -------------------------------------------------------------
+// --- marquee: colors keyframes only（TXT 六.1：删除 transform.rotation.z） ----
 
 static NSArray<UIColor *> *axs_ring_rainbow(void) {
-    // 8 segments, first == last so the conic wrap is seamless
+    // 8 段、首尾同色（conic 收口无缝）
     return @[ [UIColor redColor], [UIColor orangeColor], [UIColor yellowColor],
               [UIColor greenColor], [UIColor cyanColor], [UIColor blueColor],
               [UIColor purpleColor], [UIColor redColor] ];
-}
-
-static void axs_ring_addMarquee(CAGradientLayer *grad) {
-    CAKeyframeAnimation *rot = [CAKeyframeAnimation animationWithKeyPath:@"transform.rotation.z"];
-    rot.values = @[ @0.0, @(2.0 * M_PI) ];
-    rot.duration = 4.0;                      // ~4s per revolution
-    rot.repeatCount = HUGE_VALF;
-    rot.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-    rot.removedOnCompletion = NO;
-    [grad addAnimation:rot forKey:@"axsRingMarquee"];
 }
 
 static CAGradientLayer *axs_ring_makeGradient(BOOL custom, UIColor *color) {
@@ -215,74 +223,158 @@ static CAGradientLayer *axs_ring_makeGradient(BOOL custom, UIColor *color) {
     if (custom) {
         grad.colors = @[ (__bridge id)color.CGColor, (__bridge id)color.CGColor ];
         grad.locations = @[ @0.0, @1.0 ];
-        // 静态单色细边框：不加旋转动画
+        // 静态单色细边框：不加任何动画
     } else {
         NSArray<UIColor *> *rainbow = axs_ring_rainbow();
+        NSUInteger n = rainbow.count;
         NSMutableArray *colors = [NSMutableArray array];
         NSMutableArray *locations = [NSMutableArray array];
-        for (NSUInteger i = 0; i < rainbow.count; i++) {
+        for (NSUInteger i = 0; i < n; i++) {
             [colors addObject:(__bridge id)rainbow[i].CGColor];
-            [locations addObject:@((double)i / (double)(rainbow.count - 1))];
+            [locations addObject:@((double)i / (double)(n - 1))];
         }
         grad.colors = colors;
         grad.locations = locations;
-        axs_ring_addMarquee(grad); // added once per gradient lifecycle
+
+        // 跑马灯只走 colors 关键帧：整组颜色逐段轮转，4s 一圈，
+        // 不旋转任何层（dylib 里不出现 transform.rotation.z）
+        CAKeyframeAnimation *anim = [CAKeyframeAnimation animationWithKeyPath:@"colors"];
+        NSMutableArray *values = [NSMutableArray array];
+        for (NSUInteger shift = 0; shift < n; shift++) {
+            NSMutableArray *shifted = [NSMutableArray array];
+            for (NSUInteger j = 0; j < n; j++) {
+                [shifted addObject:(__bridge id)rainbow[(j + shift) % n].CGColor];
+            }
+            [values addObject:shifted];
+        }
+        anim.values = values;
+        anim.duration = 4.0;                 // 8 段 × 0.5s = 4s 一圈
+        anim.repeatCount = HUGE_VALF;
+        anim.calculationMode = kCAAnimationLinear;
+        anim.removedOnCompletion = NO;
+        [grad addAnimation:anim forKey:@"axsRingMarquee"];
     }
     return grad;
 }
 
-// TXT 三.1 圆角读取顺序：container.layer.cornerRadius -> 一级 subviews 的
-// layer.cornerRadius 最大值 -> 配置 splitWindowCornerRadius 兜底。
-// 禁止取 hostWindow.layer.cornerRadius（窗口层的圆角不是卡片的）。
-static CGFloat axs_ring_resolveRadius(UIView *container) {
-    CGFloat base = container.layer.cornerRadius;
-    if (base < 0.5) {
-        for (UIView *sub in container.subviews) {
-            if (sub.layer.cornerRadius > base) base = sub.layer.cornerRadius;
+// --- 圆角来源（TXT 四：逐级回退，每级 respondsToSelector 校验） ---------------
+
+// 从圆角矩形 CGPath 提取半径（取第一条曲线的控制点偏移）
+typedef struct {
+    CGFloat radius;
+    CGPoint from;
+    BOOL started;
+} AXSRingPathCtx;
+
+static void axs_ring_pathApplier(void *info, const CGPathElement *element) {
+    AXSRingPathCtx *ctx = (AXSRingPathCtx *)info;
+    switch (element->type) {
+        case kCGPathElementMoveToPoint:
+            ctx->from = element->points[0];
+            ctx->started = YES;
+            break;
+        case kCGPathElementAddLineToPoint:
+            ctx->from = element->points[0];
+            break;
+        case kCGPathElementAddCurveToPoint: {
+            CGPoint cp1 = element->points[0];
+            CGFloat dr = fabs(cp1.y - ctx->from.y);
+            if (dr < 0.01) dr = fabs(cp1.x - ctx->from.x);
+            if (ctx->radius < 0.01 && dr > 0.5) ctx->radius = dr;
+            ctx->from = element->points[3];
+            break;
+        }
+        default: break;
+    }
+}
+
+static CGFloat axs_ring_radiusFromPath(CGPathRef path) {
+    if (path == nil) return 0;
+    AXSRingPathCtx ctx = { 0, CGPointZero, NO };
+    CGPathApply(path, &ctx, axs_ring_pathApplier);
+    return ctx.radius;
+}
+
+static CGFloat axs_ring_resolveRadius(UIView *container, NSString **sourceOut) {
+    // 1. preferredCornerRadius（respondsToSelector 校验，返回值为基础类型才调）
+    if ([container respondsToSelector:@selector(preferredCornerRadius)]) {
+        SEL sel = @selector(preferredCornerRadius);
+        NSMethodSignature *sig = [container methodSignatureForSelector:sel];
+        const char *rt = sig ? [sig getArgumentTypeAtIndex:0] : "";
+        if (strcmp(rt, "d") == 0 || strcmp(rt, "f") == 0) {
+            double v = ((double(*)(id, SEL))[container methodForSelector:sel])(container, sel);
+            if (v > 0.5) { *sourceOut = @"preferred"; return (CGFloat)v; }
         }
     }
-    if (base < 0.5) base = (CGFloat)axs_ring_cornerRadius();
-    return base;
+    // 2. manager 的 sc_effectiveCornerRadius（manager = sc_sessionDidBeginHosting:
+    //    的接收者，session begin 时记录）
+    id mgr = axs_ring_managerRef;
+    if (mgr != nil && [mgr respondsToSelector:@selector(sc_effectiveCornerRadius)]) {
+        SEL sel = @selector(sc_effectiveCornerRadius);
+        NSMethodSignature *sig = [mgr methodSignatureForSelector:sel];
+        const char *rt = sig ? [sig getArgumentTypeAtIndex:0] : "";
+        if (strcmp(rt, "d") == 0 || strcmp(rt, "f") == 0) {
+            double v = ((double(*)(id, SEL))[mgr methodForSelector:sel])(mgr, sel);
+            if (v > 0.5) { *sourceOut = @"effective"; return (CGFloat)v; }
+        }
+    }
+    // 3. interactiveMaskLayer.path：环的遮罩路径直接复用宿主几何（最稳）
+    CALayer *maskLayer = nil;
+    if ([container respondsToSelector:@selector(interactiveMaskLayer)]) {
+        SEL sel = @selector(interactiveMaskLayer);
+        NSMethodSignature *sig = [container methodSignatureForSelector:sel];
+        if (sig.numberOfArguments == 2 && strcmp([sig getArgumentTypeAtIndex:0], "@") == 0) {
+            maskLayer = ((id(*)(id, SEL))[container methodForSelector:sel])(container, sel);
+        }
+    }
+    if (maskLayer == nil && [container.layer respondsToSelector:@selector(interactiveMaskLayer)]) {
+        SEL sel = @selector(interactiveMaskLayer);
+        NSMethodSignature *sig = [container.layer methodSignatureForSelector:sel];
+        if (sig.numberOfArguments == 2 && strcmp([sig getArgumentTypeAtIndex:0], "@") == 0) {
+            maskLayer = ((id(*)(id, SEL))[container.layer methodForSelector:sel])(container.layer, sel);
+        }
+    }
+    if ([maskLayer isKindOfClass:[CAShapeLayer class]]) {
+        CGPathRef p = ((CAShapeLayer *)maskLayer).path;
+        if (p != nil) {
+            axs_ring_hostMaskPath = CGPathRetain(p);
+            *sourceOut = @"mask";
+            return axs_ring_radiusFromPath(p);
+        }
+    }
+    // 4. 配置兜底
+    *sourceOut = @"config";
+    return (CGFloat)axs_ring_configRadius();
 }
 
-// 仅供日志核对（TXT 三.3）：容器 presentation transform 的 a 值，
-// 不参与圆角计算——圆角由容器层自己的 transform 物理缩放
-static CGFloat axs_ring_presentScale(UIView *container) {
-    CALayer *pres = container.layer.presentationLayer;
-    CGAffineTransform t = pres ? pres.affineTransform : CGAffineTransformIdentity;
-    CGFloat a = t.a;
-    if (!(a > 0.01)) a = 1.0;
-    return a;
-}
+// --- KVO / 体检共用的几何同步（圆角用 attach 时解析的值，不重读） -------------
 
-// KVO / 体检共用的几何同步：ringContainer.frame 跟随容器 bounds，遮罩 path
-// 与渐变外接正方形一并重算；圆角变化时打 ring radius 行
-static void axs_ring_syncRing(id frameRef) {
-    AXSRingFrame *f = frameRef;
-    if (f == nil || f.ringContainer == nil || f.container == nil) return;
+static void axs_ring_syncRing(void) {
+    if (axs_ring_ring == nil || axs_ring_container == nil) return;
     @try {
         double lineWidth = axs_ring_thickness();
         if (lineWidth < 0.5) lineWidth = 0.5;
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        f.ringContainer.frame = f.container.layer.bounds;
-        f.shape.frame = f.ringContainer.bounds;
-        CGFloat base = axs_ring_resolveRadius(f.container);
-        CGRect r = CGRectInset(f.ringContainer.bounds, lineWidth / 2.0, lineWidth / 2.0);
-        double pathRadius = axs_ring_clamp(base, 0.0, MIN(r.size.width, r.size.height) / 2.0);
-        UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:pathRadius];
-        f.shape.path = p.CGPath;
-        f.shape.lineWidth = lineWidth;
-        CGFloat side = hypot(f.ringContainer.bounds.size.width, f.ringContainer.bounds.size.height);
-        if (side < 1.0) side = 1.0;
-        f.gradient.frame = CGRectMake((f.ringContainer.bounds.size.width - side) / 2.0,
-                                      (f.ringContainer.bounds.size.height - side) / 2.0, side, side);
+        axs_ring_ring.frame = axs_ring_container.layer.bounds;
+        axs_ring_shape.frame = axs_ring_ring.bounds;
+        if (axs_ring_hostMaskPath != nil) {
+            // mask 来源：环的遮罩路径直接复用宿主几何（圆角必然一致）
+            axs_ring_shape.path = axs_ring_hostMaskPath;
+            axs_ring_shape.lineWidth = lineWidth;
+        } else {
+            CGRect r = CGRectInset(axs_ring_ring.bounds, lineWidth / 2.0, lineWidth / 2.0);
+            double pathRadius = axs_ring_clamp(axs_ring_baseRadius, 0.0, MIN(r.size.width, r.size.height) / 2.0);
+            UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:pathRadius];
+            axs_ring_shape.path = p.CGPath;
+            axs_ring_shape.lineWidth = lineWidth;
+        }
+        // 无旋转：渐变不需要外接正方形，直接铺 ring
+        axs_ring_gradient.frame = axs_ring_ring.bounds;
         [CATransaction commit];
-        f.lastPathRadius = (CGFloat)pathRadius;
-        if (fabs(f.lastRadiusLogged - base) > 0.05) {
-            f.lastRadiusLogged = base;
-            axs_ring_log(@"ring radius: host=%.1f path=%.1f scale=%.3f",
-                         base, pathRadius, (double)axs_ring_presentScale(f.container));
+        if (fabs(axs_ring_lastLoggedRadius - axs_ring_baseRadius) > 0.05) {
+            axs_ring_lastLoggedRadius = axs_ring_baseRadius;
+            axs_ring_log(@"ring radius: source=%@ host=%.1f", axs_ring_radiusSource, axs_ring_baseRadius);
         }
     } @catch (NSException *exception) {
         axs_ring_log(@"ring sync exception: %@", exception);
@@ -291,155 +383,87 @@ static void axs_ring_syncRing(id frameRef) {
 
 // --- attach / remove ---------------------------------------------------------
 
-// attach 前先把别的会话身上的环摘掉（禁止两边同时存在），再挂到本会话容器上
-static void axs_ring_attachRing(AXSRingFrame *f) {
-    if (f == nil || f.ringContainer != nil || f.container == nil) return;
-    AXSRingFrame *previous = nil;
-    for (AXSRingFrame *cand in axs_ring_frames.allValues) {
-        if (cand != f && cand.ringContainer != nil) {
-            previous = cand;
-            axs_ring_removeRing(cand, @"handover");
-        }
+// TXT 三.1：attach 前先把旧宿主上的环摘干净（禁止两边同时存在）
+static void axs_ring_attachRing(void) {
+    if (axs_ring_container == nil) return;
+    if (axs_ring_ring != nil
+        && axs_ring_ring.superlayer != nil
+        && axs_ring_ring.superlayer != axs_ring_container.layer) {
+        axs_ring_removeRing(@"handover"); // 先移除旧宿主上的 ringContainer
     }
     if (!axs_ring_enabled()) return;
 
-    CALayer *ring = [CALayer layer];
-    ring.frame = f.container.layer.bounds;
-    ring.masksToBounds = NO;
-    ring.zPosition = 9999.0;                 // 加在最后 + zPosition：盖在内容之上
+    if (axs_ring_ring == nil) {
+        CALayer *ring = [CALayer layer];
+        ring.frame = axs_ring_container.layer.bounds;
+        ring.masksToBounds = NO;
+        ring.zPosition = 9999.0;             // 盖在内容之上（CALayer 不参与命中测试）
 
-    CAShapeLayer *shape = [CAShapeLayer layer];
-    shape.fillColor = nil;                   // 只当遮罩用
-    shape.strokeColor = [UIColor whiteColor].CGColor;
-    ring.mask = shape;
+        CAShapeLayer *shape = [CAShapeLayer layer];
+        shape.fillColor = nil;               // 只当遮罩用
+        shape.strokeColor = [UIColor whiteColor].CGColor;
+        ring.mask = shape;
 
-    CAGradientLayer *grad = axs_ring_makeGradient(axs_ring_customColor(), axs_ring_color());
-    [ring addSublayer:grad];
+        CAGradientLayer *grad = axs_ring_makeGradient(axs_ring_customColor(), axs_ring_color());
+        [ring addSublayer:grad];
 
-    f.ringContainer = ring;
-    f.shape = shape;
-    f.gradient = grad;
-    [f.container.layer addSublayer:ring];    // 宿主图层最上层
+        axs_ring_ring = ring;
+        axs_ring_shape = shape;
+        axs_ring_gradient = grad;
+        [axs_ring_container.layer addSublayer:ring];
 
-    @try {
-        [f.container.layer addObserver:f forKeyPath:@"bounds" options:NSKeyValueObservingOptionNew context:nil];
-        [f.container.layer addObserver:f forKeyPath:@"cornerRadius" options:NSKeyValueObservingOptionNew context:nil];
-        f.kvoInstalled = YES;
-    } @catch (NSException *exception) {
-        axs_ring_log(@"ring kvo exception: %@", exception);
+        NSString *source = nil;
+        axs_ring_baseRadius = axs_ring_resolveRadius(axs_ring_container, &source);
+        axs_ring_radiusSource = source;
+
+        @try {
+            [axs_ring_container.layer addObserver:axs_ring_kvoObserver
+                                       forKeyPath:@"bounds" options:NSKeyValueObservingOptionNew context:nil];
+            if ([axs_ring_container respondsToSelector:@selector(preferredCornerRadius)]) {
+                [axs_ring_container addObserver:axs_ring_kvoObserver
+                                     forKeyPath:@"preferredCornerRadius" options:NSKeyValueObservingOptionNew context:nil];
+            }
+            axs_ring_kvoInstalled = YES;
+        } @catch (NSException *exception) {
+            axs_ring_log(@"ring kvo exception: %@", exception);
+        }
     }
 
-    axs_ring_syncRing(f);
-    f.ringContainer.hidden = NO;
-    if (!f.attachLogged) {
-        f.attachLogged = YES;
-        // TXT 二.2：containerLayer 必须与 session begin 行的 layer 地址一致，
-        // 且必须 != hostLayer；否则就是挂错层
-        axs_ring_log(@"ring attach: session=%p container=%p containerLayer=%p hostWindow=%p hostLayer=%p bounds=%@ radius=host=%.1f path=%.1f scale=%.3f",
-                     f.session, f.container, f.container.layer, f.container.window, f.container.window.layer,
-                     NSStringFromCGRect(f.container.layer.bounds),
-                     (double)axs_ring_resolveRadius(f.container),
-                     (double)f.lastPathRadius,
-                     (double)axs_ring_presentScale(f.container));
-    }
-    if (previous != nil) {
-        axs_ring_log(@"ring handover: session=%p -> %p hostLayer=%p",
-                     previous.session, f.session, f.container.layer);
+    axs_ring_syncRing();
+    axs_ring_ring.hidden = NO;
+    if (!axs_ring_attachLogged) {
+        axs_ring_attachLogged = YES;
+        axs_ring_log(@"ring attach: session=%p containerLayer=%p bounds=%@ radiusSource=%@ radius=%.1f",
+                     axs_ring_activeSession, axs_ring_container.layer,
+                     NSStringFromCGRect(axs_ring_container.layer.bounds),
+                     axs_ring_radiusSource, axs_ring_baseRadius);
     }
 }
 
 // TXT 二.6 / 三.1：从宿主移除 ringContainer 并把 mask 置 nil，完全无副作用
-static void axs_ring_removeRing(AXSRingFrame *f, NSString *reason) {
-    if (f == nil || f.ringContainer == nil) return;
+static void axs_ring_removeRing(NSString *reason) {
+    if (axs_ring_ring == nil) return;
     @try {
-        if (f.kvoInstalled && f.container != nil) {
-            [f.container.layer removeObserver:f forKeyPath:@"bounds"];
-            [f.container.layer removeObserver:f forKeyPath:@"cornerRadius"];
+        if (axs_ring_kvoInstalled && axs_ring_container != nil) {
+            [axs_ring_container.layer removeObserver:axs_ring_kvoObserver forKeyPath:@"bounds"];
+            if ([axs_ring_container respondsToSelector:@selector(preferredCornerRadius)]) {
+                [axs_ring_container removeObserver:axs_ring_kvoObserver forKeyPath:@"preferredCornerRadius"];
+            }
         }
     } @catch (NSException *exception) { }
-    f.kvoInstalled = NO;
-    f.ringContainer.mask = nil;
-    [f.ringContainer removeFromSuperlayer];
-    f.ringContainer = nil;
-    f.shape = nil;
-    f.gradient = nil;
-    f.attachLogged = NO;
-    axs_ring_log(@"ring detach: session=%p reason=%@", f.session, reason);
+    axs_ring_kvoInstalled = NO;
+    axs_ring_ring.mask = nil;
+    [axs_ring_ring removeFromSuperlayer];
+    axs_ring_ring = nil;
+    axs_ring_shape = nil;
+    axs_ring_gradient = nil;
+    if (axs_ring_hostMaskPath != nil) { CGPathRelease(axs_ring_hostMaskPath); axs_ring_hostMaskPath = nil; }
+    axs_ring_attachLogged = NO;
+    axs_ring_lastLoggedRadius = -1;
+    axs_ring_log(@"ring detach: session=%p reason=%@", axs_ring_activeSession, reason);
 }
 
-static void axs_ring_detachFrame(AXSRingFrame *f, NSString *reason) {
-    if (f == nil) return;
-    axs_ring_removeRing(f, reason);
-    NSString *key = nil;
-    for (NSString *k in axs_ring_frames.allKeys) {
-        if (axs_ring_frames[k] == f) { key = k; break; }
-    }
-    if (key != nil) [axs_ring_frames removeObjectForKey:key];
-}
-
-// register (or update) the mapping for a session; the ring attaches right
-// here in the hosting hook (TXT 二.实施步骤1)
-static void axs_ring_registerSession(void *session, UIView *container) {
-    if (container == nil) return;
-    axs_ring_ensureMaps();
-
-    NSString *key = axs_ring_keyForSession(session) ?: axs_ring_keyForContainer(container);
-    AXSRingFrame *f = axs_ring_frames[key];
-    if (f == nil) {
-        f = [AXSRingFrame new];
-        f.session = session;
-        f.container = container;
-        f.lastAliveAt = [[NSDate date] timeIntervalSince1970];
-        axs_ring_frames[key] = f;
-    } else {
-        if (f.session == NULL) f.session = session;
-        f.container = container;
-        f.lastAliveAt = [[NSDate date] timeIntervalSince1970];
-    }
-
-    if (f.docked) {
-        if (f.ringContainer != nil) f.ringContainer.hidden = YES;
-        return;
-    }
-    if (axs_ring_enabled()) {
-        axs_ring_attachRing(f); // 内含 handover：先摘旧宿主的环再挂新的
-    } else if (f.ringContainer != nil) {
-        axs_ring_removeRing(f, @"disabled");
-    }
-}
-
-// --- session hooks (installed deferred; see axs_ring_attemptInstall) ---------
-
-// the visible container for a session: the receiver/argument may already be
-// the container; otherwise probe the session's container-ish properties
-static UIView *axs_ring_containerFromObjects(id receiver, id session, NSString **howOut) {
-    Class containerClass = objc_getClass("SCFloatingContainerView");
-    if (containerClass != nil && [receiver isKindOfClass:containerClass]) {
-        *howOut = @"receiver";
-        return (UIView *)receiver;
-    }
-    if (session != nil && containerClass != nil && [session isKindOfClass:containerClass]) {
-        *howOut = @"argument";
-        return (UIView *)session;
-    }
-    id probeTarget = (session != nil) ? session : receiver;
-    if (probeTarget == nil) return nil;
-    NSArray<NSString *> *names = @[@"containerView", @"container", @"hostContainerView",
-                                   @"hostingContainerView", @"contentView"];
-    for (NSString *name in names) {
-        SEL sel = NSSelectorFromString(name);
-        if (![probeTarget respondsToSelector:sel]) continue;
-        NSMethodSignature *sig = [probeTarget methodSignatureForSelector:sel];
-        if (sig.numberOfArguments != 2) continue; // self + _cmd only (a getter)
-        if (strcmp([sig getArgumentTypeAtIndex:0], "@") != 0) continue; // returns object
-        id v = ((id(*)(id, SEL))[probeTarget methodForSelector:sel])(probeTarget, sel);
-        if ([v isKindOfClass:[UIView class]]) {
-            *howOut = [NSString stringWithFormat:@"probe:%@", name];
-            return (UIView *)v;
-        }
-    }
-    return nil;
-}
+// --- session hooks（延迟安装；防重入闸 + 安装幂等沿用 beautify.4 的教训） -----
 
 static void axs_ring_sessionBegin_imp(id self, SEL _cmd, id session) {
     if (axs_ring_reenter_begin) {
@@ -455,7 +479,6 @@ static void axs_ring_sessionBegin_imp(id self, SEL _cmd, id session) {
         }
         dispatch_block_t work = ^{
             if (!axs_ring_hooksInstalled) return;
-            axs_ring_ensureMaps();
             void *s = NULL;
             id container = nil;
             NSString *how = nil;
@@ -468,18 +491,28 @@ static void axs_ring_sessionBegin_imp(id self, SEL _cmd, id session) {
             }
             axs_ring_log(@"ring session begin: class=%@ session=%p container=%@ via=%@",
                          NSStringFromClass([self class]), s, container, how ?: @"none");
+            // manager（sc_effectiveCornerRadius 的候选来源）：接收者通常就是
+            // SCFloatingSceneManager，记下来供圆角解析用
+            if ([self isKindOfClass:objc_getClass("SCFloatingSceneManager")]) {
+                axs_ring_managerRef = self;
+            }
             if (container != nil) {
-                axs_ring_registerSession(s, container);
-            } else if (s != NULL) {
-                // container unknown yet: headless frame keyed by session;
-                // sc_sessionForContainerView: may fill it in later
-                NSString *key = axs_ring_keyForSession(s);
-                if (axs_ring_frames[key] == nil) {
-                    AXSRingFrame *f = [AXSRingFrame new];
-                    f.session = s;
-                    f.lastAliveAt = [[NSDate date] timeIntervalSince1970];
-                    axs_ring_frames[key] = f;
+                axs_ring_pendingSession = NULL;
+                axs_ring_pendingContainer = nil;
+                axs_ring_activeSession = s;
+                axs_ring_container = container;
+                axs_ring_docked = NO;
+                axs_ring_lastAliveAt = [[NSDate date] timeIntervalSince1970];
+                if (axs_ring_enabled()) {
+                    axs_ring_attachRing();
+                } else if (axs_ring_ring != nil) {
+                    axs_ring_removeRing(@"disabled");
                 }
+            } else if (s != NULL) {
+                // 容器未解析：挂起等待 sc_sessionForContainerView: 被动配对
+                axs_ring_pendingSession = s;
+                axs_ring_pendingContainer = nil;
+                axs_ring_pendingAt = [[NSDate date] timeIntervalSince1970];
             }
         };
         if ([NSThread isMainThread]) work(); else dispatch_async(dispatch_get_main_queue(), work);
@@ -505,15 +538,12 @@ static void axs_ring_close_imp(id self, SEL _cmd, id session) {
         void *s = session != nil ? (__bridge void *)session : NULL;
         dispatch_block_t work = ^{
             if (!axs_ring_hooksInstalled) return;
-            axs_ring_ensureMaps();
-            AXSRingFrame *f = nil;
-            if (s != NULL) f = axs_ring_frames[axs_ring_keyForSession(s)];
-            if (f == nil && s != NULL) {
-                for (AXSRingFrame *cand in axs_ring_frames.allValues) {
-                    if (cand.session == s) { f = cand; break; }
-                }
+            if (s != NULL && s == axs_ring_activeSession) {
+                axs_ring_removeRing(@"closeSession");
+                axs_ring_activeSession = NULL;
+                axs_ring_container = nil;
+                axs_ring_docked = NO;
             }
-            if (f != nil) axs_ring_detachFrame(f, @"closeSession");
             axs_ring_log(@"ring session close: class=%@ session=%p",
                          NSStringFromClass([self class]), s);
         };
@@ -540,20 +570,12 @@ static void axs_ring_dock_imp(id self, SEL _cmd, id session, long corner) {
         void *s = session != nil ? (__bridge void *)session : NULL;
         dispatch_block_t work = ^{
             if (!axs_ring_hooksInstalled) return;
-            axs_ring_ensureMaps();
-            AXSRingFrame *hit = nil;
-            if (s != NULL) hit = axs_ring_frames[axs_ring_keyForSession(s)];
-            if (hit == nil && s != NULL) {
-                for (AXSRingFrame *cand in axs_ring_frames.allValues) {
-                    if (cand.session == s) { hit = cand; break; }
-                }
-            }
-            if (hit != nil) {
-                hit.docked = YES;
-                if (hit.ringContainer != nil) hit.ringContainer.hidden = YES; // 挂起期间不画环
-                axs_ring_log(@"ring dock: session=%p corner=%ld", hit.session, corner);
+            if (s != NULL && s == axs_ring_activeSession) {
+                axs_ring_docked = YES;
+                if (axs_ring_ring != nil) axs_ring_ring.hidden = YES; // 挂起期间不画环
+                axs_ring_log(@"ring dock: session=%p corner=%ld", s, corner);
             } else {
-                axs_ring_log(@"ring dock ignored: session=%p corner=%ld (no ring)", s, corner);
+                axs_ring_log(@"ring dock ignored: session=%p corner=%ld (not active)", s, corner);
             }
         };
         if ([NSThread isMainThread]) work(); else dispatch_async(dispatch_get_main_queue(), work);
@@ -581,11 +603,8 @@ static id axs_ring_sessionForContainer_imp(id self, SEL _cmd, id container) {
             UIView *v = (UIView *)container;
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (!axs_ring_hooksInstalled) return;
-                axs_ring_ensureMaps();
-                AXSRingFrame *f = axs_ring_frames[axs_ring_keyForSession(s)];
-                if (f != nil && f.container == nil) {
-                    f.container = v;
-                    f.lastAliveAt = [[NSDate date] timeIntervalSince1970];
+                if (axs_ring_pendingSession == s && axs_ring_pendingContainer == nil) {
+                    axs_ring_pendingContainer = v; // 0.5s 体检里认领
                 }
             });
         }
@@ -597,65 +616,75 @@ static id axs_ring_sessionForContainer_imp(id self, SEL _cmd, id container) {
     }
 }
 
-// --- health check (0.5s) + config reaction --------------------------------------
+// --- 0.5s 体检 + 开关反应 ------------------------------------------------------
 
-// TXT 五.2：有效性体检（0.5s，引擎内定时器，不是逐帧刷新）。
-// 容器离层（window/superview/layer.superlayer 任一为空）→ 立即 detach 清环
-// （reason=hostGone）并打 suspend；回到层级打 resume 并按完整 attach 流程
-// 重挂（不复用旧 ring layer）；开关关闭时全摘（ringContainer 移除 + mask 置 nil）
+// TXT 五.2：有效性体检（0.5s，引擎定时器，非逐帧）。容器离层 → 立即摘环
+// （reason=hostGone）并打 suspend；回来打 resume 并完整重挂；开关关闭全摘
 static void axs_ring_reconcile(void) {
     if (!axs_ring_hooksInstalled) return;
     @try {
-        axs_ring_ensureMaps();
-        BOOL enabled = axs_ring_enabled();
         double now = [[NSDate date] timeIntervalSince1970];
+        BOOL enabled = axs_ring_enabled();
 
-        for (NSString *key in [axs_ring_frames.allKeys copy]) {
-            AXSRingFrame *f = axs_ring_frames[key];
+        // pending 认领：sc_sessionForContainerView: 配对到的容器
+        if (axs_ring_pendingSession != NULL && axs_ring_pendingContainer != nil) {
+            UIView *pc = axs_ring_pendingContainer;
+            if (pc.window != nil && pc.superview != nil && now - axs_ring_pendingAt < 5.0
+                && axs_ring_activeSession == NULL) {
+                axs_ring_activeSession = axs_ring_pendingSession;
+                axs_ring_container = pc;
+                axs_ring_docked = NO;
+                axs_ring_pendingSession = NULL;
+                axs_ring_pendingContainer = nil;
+                if (enabled) axs_ring_attachRing();
+            } else if (now - axs_ring_pendingAt >= 5.0) {
+                axs_ring_pendingSession = NULL;
+                axs_ring_pendingContainer = nil;
+            }
+        }
 
-            if (f.container == nil) {
-                // headless：会话已知、容器未解析
-                if (f.lastAliveAt > 0.0 && now - f.lastAliveAt > 5.0) {
-                    axs_ring_detachFrame(f, @"unresolved session");
-                }
-                continue;
-            }
+        if (axs_ring_activeSession == NULL) return;
 
-            BOOL inHierarchy = (f.container.window != nil
-                                && f.container.superview != nil
-                                && f.container.layer.superlayer != nil);
-            if (!inHierarchy) {
-                if (f.inHierarchy) {
-                    f.inHierarchy = NO;
-                    axs_ring_removeRing(f, @"hostGone"); // ring detach: reason=hostGone
-                    axs_ring_log(@"ring suspend: session=%p", f.session);
-                } else if (f.ringContainer != nil) {
-                    axs_ring_removeRing(f, @"hostGone");
-                }
-                if (f.lastAliveAt > 0.0 && now - f.lastAliveAt > 5.0) {
-                    axs_ring_detachFrame(f, @"hostGone");
-                }
-                continue;
-            }
-            if (!f.inHierarchy) {
-                f.inHierarchy = YES;
-                axs_ring_log(@"ring resume: session=%p container=%p", f.session, f.container);
-            }
-            f.lastAliveAt = now;
+        UIView *container = axs_ring_container;
+        BOOL inHierarchy = (container != nil
+                            && container.window != nil
+                            && container.superview != nil
+                            && container.layer.superlayer != nil);
 
-            if (!enabled) {
-                if (f.ringContainer != nil) axs_ring_removeRing(f, @"disabled");
-                continue;
+        if (!enabled) {
+            if (axs_ring_ring != nil) axs_ring_removeRing(@"disabled");
+            return;
+        }
+        if (!inHierarchy) {
+            if (!axs_ring_suspended) {
+                axs_ring_suspended = YES;
+                axs_ring_removeRing(@"hostGone"); // ring detach: reason=hostGone
+                axs_ring_log(@"ring suspend: session=%p", axs_ring_activeSession);
             }
-            if (f.docked) {
-                if (f.ringContainer != nil && !f.ringContainer.hidden) f.ringContainer.hidden = YES;
-                continue;
+            if (now - axs_ring_lastAliveAt > 30.0) {
+                // 宿主长时间不回来：清状态，等新 session 走完整 attach
+                axs_ring_activeSession = NULL;
+                axs_ring_container = nil;
+                axs_ring_suspended = NO;
+                axs_ring_log(@"ring suspend cleanup: session cleared");
             }
-            if (f.ringContainer == nil) {
-                axs_ring_attachRing(f); // 回前台重建的容器：完整 attach，不复用旧 ring layer
-            } else if (f.ringContainer.hidden) {
-                f.ringContainer.hidden = NO;
-            }
+            return;
+        }
+        if (axs_ring_suspended) {
+            axs_ring_suspended = NO;
+            axs_ring_lastAliveAt = now;
+            axs_ring_log(@"ring resume: session=%p container=%p", axs_ring_activeSession, container);
+        }
+        axs_ring_lastAliveAt = now;
+
+        if (axs_ring_docked) {
+            if (axs_ring_ring != nil && !axs_ring_ring.hidden) axs_ring_ring.hidden = YES;
+            return;
+        }
+        if (axs_ring_ring == nil) {
+            axs_ring_attachRing(); // 回前台重建的容器：完整 attach，不复用旧 layer
+        } else if (axs_ring_ring.hidden) {
+            axs_ring_ring.hidden = NO;
         }
     } @catch (NSException *exception) {
         axs_ring_log(@"ring reconcile exception: %@", exception);
@@ -718,10 +747,18 @@ static int axs_ring_tryHook(int slot, const char *name, SEL selector, IMP replac
 
 static void axs_ring_scheduleAttempt(double delay);
 
+// --- health-check timer target -------------------------------------------------
+
+@interface AXSRingHealthTarget : NSObject
+- (void)axsRingTick;
+@end
+@implementation AXSRingHealthTarget
+- (void)axsRingTick { axs_ring_reconcile(); }
+@end
+
 static void axs_ring_attemptInstall(void) {
     if (axs_ring_hooksInstalled) return;
     axs_ring_installAttempts++;
-    axs_ring_ensureMaps();
 
     int begin = axs_ring_tryHook(0, "sc_sessionDidBeginHosting:", @selector(sc_sessionDidBeginHosting:), (IMP)axs_ring_sessionBegin_imp, &axs_ring_origSessionBegin);
     int close = axs_ring_tryHook(1, "sc_closeSession:", @selector(sc_closeSession:), (IMP)axs_ring_close_imp, &axs_ring_origClose);
@@ -763,9 +800,9 @@ static void axs_ring_scheduleAttempt(double delay) {
 %ctor {
     @autoreleasepool {
         if (objc_getClass("SpringBoard") != nil) {
-            axs_ring_ensureMaps();
+            axs_ring_kvoObserver = [AXSRingKVOObserver new];
             axs_ring_log(@"ring module loaded in SpringBoard");
-            // 设置保存通知：开关变化立即生效（1s 体检兜底）
+            // 设置保存通知：开关变化立即生效（0.5s 体检兜底）
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                             NULL, axs_ring_prefsChanged,
                                             (__bridge CFStringRef)AxsHoldLaunchTheirPrefsSaved,
