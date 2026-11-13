@@ -38,7 +38,9 @@
 
 static void axs_ring_syncRing(id frame);
 static void axs_ring_reconcile(void);
-static void axs_ring_removeRing(id frame, NSString *reason);
+
+@class AXSRingFrame;
+static void axs_ring_removeRing(AXSRingFrame *frame, NSString *reason);
 
 @interface AXSRingHealthTarget : NSObject
 - (void)axsRingTick;
