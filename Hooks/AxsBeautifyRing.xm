@@ -49,7 +49,6 @@ static CGPathRef axs_ring_hostMaskPath = nil;     // mask 来源时复用的宿�
 static BOOL axs_ring_kvoInstalled = NO;
 static BOOL axs_ring_docked = NO;
 static BOOL axs_ring_attachLogged = NO;
-static BOOL axs_ring_inHierarchy = NO;
 static BOOL axs_ring_suspended = NO;
 static CGFloat axs_ring_lastLoggedRadius = -1;
 static NSTimer *axs_ring_healthTimer = nil;
