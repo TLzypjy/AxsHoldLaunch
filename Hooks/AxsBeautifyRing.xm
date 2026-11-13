@@ -299,7 +299,7 @@ static CGFloat axs_ring_radiusFromPath(CGPathRef path) {
 static UIView *axs_ring_ivarView(id obj, const char *name) {
     if (obj == nil) return nil;
     @try {
-        Ivar ivar = class_getInstanceVariable(obj_getClass(obj), name);
+        Ivar ivar = class_getInstanceVariable(object_getClass(obj), name);
         if (ivar == nil) return nil;
         id v = object_getIvar(obj, ivar);
         return [v isKindOfClass:[UIView class]] ? v : nil;
@@ -344,7 +344,7 @@ static CGFloat axs_ring_resolveRadiusChain(UIView *container, NSString **sourceO
                 double v = ((double(*)(id, SEL))[obj methodForSelector:selPreferred])(obj, selPreferred);
                 if (v > 0.5) {
                     if (log) axs_ring_log(@"ring probe: radiusOwner class=%@ selector=%@ value=%.2f",
-                                          NSStringFromClass([obj class]), "preferredCornerRadius", v);
+                                          NSStringFromClass([obj class]), @"preferredCornerRadius", v);
                     *sourceOut = @"preferred";
                     return (CGFloat)v;
                 }
@@ -358,7 +358,7 @@ static CGFloat axs_ring_resolveRadiusChain(UIView *container, NSString **sourceO
                 double v = ((double(*)(id, SEL))[obj methodForSelector:selEffective])(obj, selEffective);
                 if (v > 0.5) {
                     if (log) axs_ring_log(@"ring probe: radiusOwner class=%@ selector=%@ value=%.2f",
-                                          NSStringFromClass([obj class]), "sc_effectiveCornerRadius", v);
+                                          NSStringFromClass([obj class]), @"sc_effectiveCornerRadius", v);
                     *sourceOut = @"effective";
                     return (CGFloat)v;
                 }
@@ -374,7 +374,7 @@ static CGFloat axs_ring_resolveRadiusChain(UIView *container, NSString **sourceO
                     if (log) {
                         CGRect bb = CGPathGetBoundingBox(p);
                         axs_ring_log(@"ring probe: radiusOwner class=%@ selector=%@ value=%.2f path=%@",
-                                     NSStringFromClass([obj class]), "interactiveMaskLayer",
+                                     NSStringFromClass([obj class]), @"interactiveMaskLayer",
                                      axs_ring_radiusFromPath(p), NSStringFromCGRect(bb));
                     }
                     if (pathOut != nil) *pathOut = CGPathRetain(p);
