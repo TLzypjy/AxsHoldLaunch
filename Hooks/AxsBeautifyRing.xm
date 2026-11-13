@@ -231,25 +231,6 @@ static CAGradientLayer *axs_ring_makeGradient(BOOL custom, UIColor *color) {
     return grad;
 }
 
-// the visible rounded card = the container's largest child that stays INSIDE
-// the container bounds (the gesture overlay pokes out on every side, so size
-// alone would pick the wrong subview)
-static UIView *axs_ring_contentChild(UIView *container) {
-    UIView *best = nil;
-    CGFloat bestArea = 0;
-    CGFloat cw = container.bounds.size.width;
-    CGFloat ch = container.bounds.size.height;
-    for (UIView *sub in container.subviews) {
-        if (sub.hidden || sub.alpha < 0.05) continue;
-        CGRect f = sub.frame;
-        if (f.origin.x < -1 || f.origin.y < -1) continue;
-        if (f.size.width > cw + 1 || f.size.height > ch + 1) continue;
-        CGFloat area = f.size.width * f.size.height;
-        if (area > bestArea) { bestArea = area; best = sub; }
-    }
-    return best;
-}
-
 // TXT 三.1 圆角读取顺序：container.layer.cornerRadius -> 一级 subviews 的
 // layer.cornerRadius 最大值 -> 配置 splitWindowCornerRadius 兜底。
 // 禁止取 hostWindow.layer.cornerRadius（窗口层的圆角不是卡片的）。
