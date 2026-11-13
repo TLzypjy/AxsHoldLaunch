@@ -96,7 +96,7 @@ check "dylib has radius log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' 
 check "dylib has reentry gate" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring reentry blocked: %s'"
 check "dylib has holdpress log in Documents" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'Documents/AxsHoldLaunch.log'"
 check "dylib has no Caches log path left" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'Caches/AxsHoldLaunch.log') -eq 0"
-check "dylib has same-host handover" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring handover: session=%p -> %p host=%p'"
+check "dylib has handover log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring handover: session=%p -> %p hostLayer=%p'"
 
 # 7) package + verify
 DEB="$OUT/com.susudear.screencore_${VERSION}_iphoneos-arm64.deb"

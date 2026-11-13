@@ -297,8 +297,12 @@ static void axs_ring_syncRing(id frameRef) {
 // attach 前先把别的会话身上的环摘掉（禁止两边同时存在），再挂到本会话容器上
 static void axs_ring_attachRing(AXSRingFrame *f) {
     if (f == nil || f.ringContainer != nil || f.container == nil) return;
+    AXSRingFrame *previous = nil;
     for (AXSRingFrame *cand in axs_ring_frames.allValues) {
-        if (cand != f && cand.ringContainer != nil) axs_ring_removeRing(cand, @"handover");
+        if (cand != f && cand.ringContainer != nil) {
+            previous = cand;
+            axs_ring_removeRing(cand, @"handover");
+        }
     }
     if (!axs_ring_enabled()) return;
 
@@ -334,6 +338,10 @@ static void axs_ring_attachRing(AXSRingFrame *f) {
         f.attachLogged = YES;
         axs_ring_log(@"ring attach: session=%p hostLayer=%p bounds=%@",
                      f.session, f.container.layer, NSStringFromCGRect(f.container.layer.bounds));
+    }
+    if (previous != nil) {
+        axs_ring_log(@"ring handover: session=%p -> %p hostLayer=%p",
+                     previous.session, f.session, f.container.layer);
     }
 }
 
