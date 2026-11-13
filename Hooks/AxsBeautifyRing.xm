@@ -58,7 +58,9 @@ static void axs_ring_removeRing(AXSRingFrame *frame, NSString *reason);
 @property (nonatomic, assign) BOOL kvoInstalled;
 @property (nonatomic, assign) BOOL docked;
 @property (nonatomic, assign) BOOL attachLogged;
+@property (nonatomic, assign) BOOL inHierarchy;
 @property (nonatomic, assign) CGFloat lastRadiusLogged;
+@property (nonatomic, assign) CGFloat lastPathRadius;
 @property (nonatomic, assign) double lastAliveAt;
 @end
 @implementation AXSRingFrame
@@ -248,16 +250,28 @@ static UIView *axs_ring_contentChild(UIView *container) {
     return best;
 }
 
-// 宿主真实圆角：container.layer.cornerRadius -> 内容子视图的 cornerRadius
-// -> 配置 splitWindowCornerRadius 兜底
+// TXT 三.1 圆角读取顺序：container.layer.cornerRadius -> 一级 subviews 的
+// layer.cornerRadius 最大值 -> 配置 splitWindowCornerRadius 兜底。
+// 禁止取 hostWindow.layer.cornerRadius（窗口层的圆角不是卡片的）。
 static CGFloat axs_ring_resolveRadius(UIView *container) {
     CGFloat base = container.layer.cornerRadius;
     if (base < 0.5) {
-        UIView *content = axs_ring_contentChild(container);
-        if (content != nil) base = content.layer.cornerRadius;
+        for (UIView *sub in container.subviews) {
+            if (sub.layer.cornerRadius > base) base = sub.layer.cornerRadius;
+        }
     }
     if (base < 0.5) base = (CGFloat)axs_ring_cornerRadius();
     return base;
+}
+
+// 仅供日志核对（TXT 三.3）：容器 presentation transform 的 a 值，
+// 不参与圆角计算——圆角由容器层自己的 transform 物理缩放
+static CGFloat axs_ring_presentScale(UIView *container) {
+    CALayer *pres = container.layer.presentationLayer;
+    CGAffineTransform t = pres ? pres.affineTransform : CGAffineTransformIdentity;
+    CGFloat a = t.a;
+    if (!(a > 0.01)) a = 1.0;
+    return a;
 }
 
 // KVO / 体检共用的几何同步：ringContainer.frame 跟随容器 bounds，遮罩 path
@@ -283,9 +297,11 @@ static void axs_ring_syncRing(id frameRef) {
         f.gradient.frame = CGRectMake((f.ringContainer.bounds.size.width - side) / 2.0,
                                       (f.ringContainer.bounds.size.height - side) / 2.0, side, side);
         [CATransaction commit];
+        f.lastPathRadius = (CGFloat)pathRadius;
         if (fabs(f.lastRadiusLogged - base) > 0.05) {
             f.lastRadiusLogged = base;
-            axs_ring_log(@"ring radius: host=%.1f path=%.1f", base, pathRadius);
+            axs_ring_log(@"ring radius: host=%.1f path=%.1f scale=%.3f",
+                         base, pathRadius, (double)axs_ring_presentScale(f.container));
         }
     } @catch (NSException *exception) {
         axs_ring_log(@"ring sync exception: %@", exception);
@@ -336,8 +352,14 @@ static void axs_ring_attachRing(AXSRingFrame *f) {
     f.ringContainer.hidden = NO;
     if (!f.attachLogged) {
         f.attachLogged = YES;
-        axs_ring_log(@"ring attach: session=%p hostLayer=%p bounds=%@",
-                     f.session, f.container.layer, NSStringFromCGRect(f.container.layer.bounds));
+        // TXT 二.2：containerLayer 必须与 session begin 行的 layer 地址一致，
+        // 且必须 != hostLayer；否则就是挂错层
+        axs_ring_log(@"ring attach: session=%p container=%p containerLayer=%p hostWindow=%p hostLayer=%p bounds=%@ radius=host=%.1f path=%.1f scale=%.3f",
+                     f.session, f.container, f.container.layer, f.container.window, f.container.window.layer,
+                     NSStringFromCGRect(f.container.layer.bounds),
+                     (double)axs_ring_resolveRadius(f.container),
+                     (double)f.lastPathRadius,
+                     (double)axs_ring_presentScale(f.container));
     }
     if (previous != nil) {
         axs_ring_log(@"ring handover: session=%p -> %p hostLayer=%p",
@@ -594,10 +616,12 @@ static id axs_ring_sessionForContainer_imp(id self, SEL _cmd, id container) {
     }
 }
 
-// --- health check (1s) + config reaction --------------------------------------
+// --- health check (0.5s) + config reaction --------------------------------------
 
-// TXT 三.2：定时体检。宿主不在层级上立即摘环；活着的宿主自愈重挂；
-// 开关关闭时全摘（ringContainer 移除 + mask 置 nil）
+// TXT 五.2：有效性体检（0.5s，引擎内定时器，不是逐帧刷新）。
+// 容器离层（window/superview/layer.superlayer 任一为空）→ 立即 detach 清环
+// （reason=hostGone）并打 suspend；回到层级打 resume 并按完整 attach 流程
+// 重挂（不复用旧 ring layer）；开关关闭时全摘（ringContainer 移除 + mask 置 nil）
 static void axs_ring_reconcile(void) {
     if (!axs_ring_hooksInstalled) return;
     @try {
@@ -616,27 +640,38 @@ static void axs_ring_reconcile(void) {
                 continue;
             }
 
-            BOOL inHierarchy = (f.container.window != nil && f.container.superview != nil);
+            BOOL inHierarchy = (f.container.window != nil
+                                && f.container.superview != nil
+                                && f.container.layer.superlayer != nil);
+            if (!inHierarchy) {
+                if (f.inHierarchy) {
+                    f.inHierarchy = NO;
+                    axs_ring_removeRing(f, @"hostGone"); // ring detach: reason=hostGone
+                    axs_ring_log(@"ring suspend: session=%p", f.session);
+                } else if (f.ringContainer != nil) {
+                    axs_ring_removeRing(f, @"hostGone");
+                }
+                if (f.lastAliveAt > 0.0 && now - f.lastAliveAt > 5.0) {
+                    axs_ring_detachFrame(f, @"hostGone");
+                }
+                continue;
+            }
+            if (!f.inHierarchy) {
+                f.inHierarchy = YES;
+                axs_ring_log(@"ring resume: session=%p container=%p", f.session, f.container);
+            }
+            f.lastAliveAt = now;
+
             if (!enabled) {
                 if (f.ringContainer != nil) axs_ring_removeRing(f, @"disabled");
                 continue;
             }
-            if (!inHierarchy) {
-                // 宿主已不在层级上：立即摘环清 mask，不留空白浮窗的环
-                if (f.ringContainer != nil) axs_ring_removeRing(f, @"host gone");
-                if (f.lastAliveAt > 0.0 && now - f.lastAliveAt > 5.0) {
-                    axs_ring_detachFrame(f, @"host gone");
-                }
-                continue;
-            }
-            f.lastAliveAt = now;
-
             if (f.docked) {
                 if (f.ringContainer != nil && !f.ringContainer.hidden) f.ringContainer.hidden = YES;
                 continue;
             }
             if (f.ringContainer == nil) {
-                axs_ring_attachRing(f); // 自愈：宿主回来了就重新挂环
+                axs_ring_attachRing(f); // 回前台重建的容器：完整 attach，不复用旧 ring layer
             } else if (f.ringContainer.hidden) {
                 f.ringContainer.hidden = NO;
             }
@@ -646,7 +681,7 @@ static void axs_ring_reconcile(void) {
     }
 }
 
-// Darwin 通知：设置保存后立即重查开关状态（1s 体检兜底）
+// Darwin 通知：设置保存后立即重查开关状态（0.5s 体检兜底）
 static void axs_ring_prefsChanged(CFNotificationCenterRef center, void *observer,
                                   CFStringRef name, const void *object, CFDictionaryRef info) {
     dispatch_async(dispatch_get_main_queue(), ^{ axs_ring_reconcile(); });
@@ -716,7 +751,7 @@ static void axs_ring_attemptInstall(void) {
         axs_ring_hooksInstalled = YES;
         axs_ring_log(@"ring hooks: begin=%d close=%d dock=%d forContainer=%d", begin, close, dock, forContainer);
         if (axs_ring_healthTimer == nil) {
-            axs_ring_healthTimer = [NSTimer timerWithTimeInterval:1.0
+            axs_ring_healthTimer = [NSTimer timerWithTimeInterval:0.5
                                                            target:[[AXSRingHealthTarget alloc] init]
                                                          selector:@selector(axsRingTick)
                                                          userInfo:nil
