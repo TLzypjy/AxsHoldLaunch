@@ -50,6 +50,7 @@ static BOOL axs_ring_kvoInstalled = NO;
 static BOOL axs_ring_docked = NO;
 static BOOL axs_ring_attachLogged = NO;
 static BOOL axs_ring_suspended = NO;
+static void *axs_ring_handoverFrom = NULL; // attach 时如有旧环，打 handover 行
 static CGFloat axs_ring_lastLoggedRadius = -1;
 static NSTimer *axs_ring_healthTimer = nil;
 
@@ -385,9 +386,10 @@ static void axs_ring_syncRing(void) {
 // TXT 三.1：attach 前先把旧宿主上的环摘干净（禁止两边同时存在）
 static void axs_ring_attachRing(void) {
     if (axs_ring_container == nil) return;
-    if (axs_ring_ring != nil
-        && axs_ring_ring.superlayer != nil
-        && axs_ring_ring.superlayer != axs_ring_container.layer) {
+    BOOL handover = (axs_ring_ring != nil
+                     && axs_ring_ring.superlayer != nil
+                     && axs_ring_ring.superlayer != axs_ring_container.layer);
+    if (handover) {
         axs_ring_removeRing(@"handover"); // 先移除旧宿主上的 ringContainer
     }
     if (!axs_ring_enabled()) return;
@@ -436,6 +438,10 @@ static void axs_ring_attachRing(void) {
                      axs_ring_activeSession, axs_ring_container.layer,
                      NSStringFromCGRect(axs_ring_container.layer.bounds),
                      axs_ring_radiusSource, axs_ring_baseRadius);
+    }
+    if (handover) {
+        axs_ring_log(@"ring handover: session=%p -> %p hostLayer=%p",
+                     axs_ring_handoverFrom, axs_ring_activeSession, axs_ring_container.layer);
     }
 }
 
@@ -498,6 +504,9 @@ static void axs_ring_sessionBegin_imp(id self, SEL _cmd, id session) {
             if (container != nil) {
                 axs_ring_pendingSession = NULL;
                 axs_ring_pendingContainer = nil;
+                // handover 记录：旧会话的环即将转移到新会话（attachRing 里打日志）
+                axs_ring_handoverFrom = (axs_ring_ring != nil && axs_ring_activeSession != NULL
+                                         && axs_ring_activeSession != s) ? axs_ring_activeSession : NULL;
                 axs_ring_activeSession = s;
                 axs_ring_container = container;
                 axs_ring_docked = NO;
