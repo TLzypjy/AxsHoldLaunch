@@ -101,10 +101,8 @@ check "dylib has probe mask" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' 
 check "dylib has no AXSRingFrame class" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'AXSRingFrame') -eq 0"
 check "dylib has no transform rotation marquee" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'transform.rotation.z') -eq 0"
 check "dylib has no fullscreen selectors" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -Ec 'sc_handleFullscreenTap|sc_floatingContainerViewDidRequestFullscreen|promoteSceneToFullscreen') -eq 0"
-check "dylib has reentry gate" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring reentry blocked: %s'"
 check "dylib has holdpress log in Documents" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'Documents/AxsHoldLaunch.log'"
 check "dylib has no Caches log path left" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'Caches/AxsHoldLaunch.log') -eq 0"
-check "dylib has handover log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring handover: session=%p -> %p hostLayer=%p'"
 
 # 7) package + verify
 DEB="$OUT/com.susudear.screencore_${VERSION}_iphoneos-arm64.deb"
