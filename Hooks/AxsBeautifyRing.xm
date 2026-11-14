@@ -306,21 +306,6 @@ static void axs_ring_removeEntryAt(int index) {
     axs_ring_entryCount--;
 }
 
-static int axs_ring_indexOfContainer(UIView *container) {
-    for (int i = 0; i < axs_ring_entryCount; i++) {
-        if (axs_ring_entries[i].container == container) return i;
-    }
-    return -1;
-}
-
-// TXT 四.2：回前台探测启动封面与 scene presentation 状态（白屏归因）
-static NSString *axs_ring_describeView(UIView *v) {
-    if (v == nil) return @"nil";
-    return [NSString stringWithFormat:@"%@ hidden=%d alpha=%.2f subviews=%u frame=%@",
-            NSStringFromClass(v.class), v.hidden ? 1 : 0, v.alpha,
-            (unsigned)v.subviews.count, NSStringFromCGRect(v.frame)];
-}
-
 // --- attach / refresh / detach（全部由扫描触发） ------------------------------
 
 static void axs_ring_attachEntry(UIView *container) {
