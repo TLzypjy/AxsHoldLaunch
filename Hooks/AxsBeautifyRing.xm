@@ -444,8 +444,11 @@ static void axs_ring_collectContainers(UIView *view, NSMutableArray *out, int de
 static void axs_ring_scanTick(void) {
     @try {
         NSMutableArray *live = [NSMutableArray array];
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            axs_ring_collectContainers(w, live, 0);
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                axs_ring_collectContainers(w, live, 0);
+            }
         }
 
         // a) 已消失的容器 → 摘环（倒序遍历便于移除条目）
