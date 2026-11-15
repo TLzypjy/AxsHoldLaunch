@@ -219,10 +219,6 @@ static CGFloat axs_ring_radiusFromPath(CGPathRef path) {
 @end
 
 static NSMutableDictionary<NSString *, AXSRingLinkDriver *> *axs_ring_drivers = nil;
-static AXSRingLinkDriver *axs_ring_driverFor(UIView *container) {
-    NSString *key = [NSString stringWithFormat:@"%p", container];
-    return axs_ring_drivers[key];
-}
 
 // 容器子树里找 interaction overlay（一层即中，找不到再进一层）
 static UIView *axs_ring_findOverlay(UIView *container) {
