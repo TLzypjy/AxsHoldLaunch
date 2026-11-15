@@ -224,6 +224,9 @@ static void axs_ring_collectMasks(UIView *view, int depth, NSMutableArray<CAShap
 
 // --- 每容器驱动（CADisplayLink 一对一；容器消失即停） -------------------------
 
+@class AXSRingLinkDriver;
+@class AXSRingHealthTarget;
+
 static void axs_ring_syncDriver(AXSRingLinkDriver *driver);
 
 @interface AXSRingLinkDriver : NSObject
@@ -249,7 +252,6 @@ static void axs_ring_syncDriver(AXSRingLinkDriver *driver);
 @end
 
 static NSMutableDictionary<NSString *, AXSRingLinkDriver *> *axs_ring_drivers = nil;
-static AXSRingHealthTarget *axs_ring_healthTarget = nil;
 
 // 容器子树里找 interaction overlay（一层即中，找不到再进一层）
 static UIView *axs_ring_findOverlay(UIView *container) {
