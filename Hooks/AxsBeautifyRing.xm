@@ -384,7 +384,7 @@ static void axs_ring_syncDriver(AXSRingLinkDriver *driver) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         driver.ring.frame = ringBounds;
-        driver.ring.bounds = (CGRect){0, 0, insetRect.size};
+        driver.ring.bounds = CGRectMake(0, 0, insetRect.size.width, insetRect.size.height);
         driver.ring.position = insetRect.origin;
         driver.shape.frame = driver.ring.bounds;
         driver.shape.path = local;               // 复用 mask 原始几何
