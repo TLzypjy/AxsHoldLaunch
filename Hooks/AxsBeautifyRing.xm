@@ -103,6 +103,12 @@ static UIColor *axs_ring_parseHex(NSString *hex, UIColor *fallback) {
     return fallback;
 }
 
+static double axs_ring_configRadius(void) {
+    id v = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:@"splitWindowCornerRadius" defaultValue:@8.0];
+    double r = [v isKindOfClass:[NSNumber class]] ? [v doubleValue] : 8.0;
+    return axs_ring_clamp(r, 0.0, 60.0);
+}
+
 static UIColor *axs_ring_color(void) {
     id v = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:@"splitBeautifyRingFrameColor" defaultValue:@"#93E3FD"];
     return axs_ring_parseHex([v isKindOfClass:[NSString class]] ? v : nil,
@@ -194,6 +200,33 @@ static CGFloat axs_ring_radiusFromPath(CGPathRef path) {
     AXSRingPathCtx ctx = { 0, CGPointZero, NO };
     CGPathApply(path, &ctx, axs_ring_pathApplier);
     return ctx.radius;
+}
+
+// 读 CAShapeLayer 类型的 ivar（SCFloatingCornerGestureRegionView 的
+// _interactiveMaskLayer 等）
+static CAShapeLayer *axs_ring_ivarShape(id obj, const char *name) {
+    if (obj == nil) return nil;
+    @try {
+        Ivar ivar = class_getInstanceVariable(object_getClass(obj), name);
+        if (ivar == nil) return nil;
+        id v = object_getIvar(obj, ivar);
+        return [v isKindOfClass:[CAShapeLayer class]] ? v : nil;
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+// 递归收集子树内所有 CAShapeLayer 遮罩（layer.mask + _interactiveMaskLayer）
+static void axs_ring_collectMasks(UIView *view, int depth, NSMutableArray<CAShapeLayer *> *out) {
+    if (view == nil || depth > 4) return;
+    if ([view.layer.mask isKindOfClass:[CAShapeLayer class]]) {
+        [out addObject:(CAShapeLayer *)view.layer.mask];
+    }
+    CAShapeLayer *im = axs_ring_ivarShape(view, "_interactiveMaskLayer");
+    if (im != nil && im.path != nil) [out addObject:im];
+    for (UIView *sub in view.subviews) {
+        axs_ring_collectMasks(sub, depth + 1, out);
+    }
 }
 
 // --- 每容器驱动（CADisplayLink 一对一；容器消失即停） -------------------------
