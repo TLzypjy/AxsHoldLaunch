@@ -459,6 +459,8 @@ static void axs_ring_scanTick(void) {
     dispatch_async(dispatch_get_main_queue(), ^{ axs_ring_scanTick(); });
 }
 @end
+static NSTimer *axs_ring_scanTimer = nil;
+
 static AXSRingHealthTarget *axs_ring_healthTarget = nil;
 
 // Darwin 通知：设置保存后立即重扫（0.5s 定时器兜底）
