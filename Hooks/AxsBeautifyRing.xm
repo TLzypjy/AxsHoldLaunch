@@ -282,11 +282,16 @@ static void axs_ring_syncDriver(AXSRingLinkDriver *driver) {
         if (bounds.size.width < 20 || bounds.size.height < 20) return;
 
         // 圆角：选中的整框 mask 半径，逐帧从该 mask 的当前 path 重读——
-        // ScreenCore 随窗口尺寸更新它，环跟它走；取不到沿用上帧值
+        // ScreenCore 随窗口尺寸更新它，环跟它走；mask 从未命中则回退配置圆角，
+        // 两者都没有才沿用上帧值（首帧即失败时给出合理圆角而非方形）
         CGFloat radius = driver.lastRadius;
-        if (driver.radiusMask != nil && driver.radiusMask.path != nil) {
-            CGFloat r = axs_ring_radiusFromPath(driver.radiusMask.path);
-            if (r > 0.5) radius = r;
+        CGFloat maskR = (driver.radiusMask != nil) ? axs_ring_radiusFromPath(driver.radiusMask.path) : 0;
+        if (maskR > 0.5) {
+            radius = maskR;
+            driver.radiusSource = @"overlayMask";
+        } else if (radius <= 0.5) {
+            radius = (CGFloat)axs_ring_configRadius();
+            driver.radiusSource = @"config";
         }
 
         BOOL changed = !CGRectEqualToRect(bounds, driver.lastBounds)
