@@ -375,19 +375,39 @@ static void axs_ring_treeProbe(UIView *container) {
     axs_ring_treeWalk(w.layer, 0);
 }
 
-// --- 几何同步（displayLink 每帧调用；静止即跳过） -----------------------------
+// --- 几何同步（displayLink 每帧 + layoutSubviews 钩子共用） --------------------
 
-static void axs_ring_syncDriver(AXSRingLinkDriver *driver) {
+// preferModel=YES（布局钩子路径）：手势直改模型后布局未提交，模型即最新值，
+// 环用模型尺寸可与卡片同一个 commit 生效——右/下边（origin+size）不再滞后一帧
+// （TXT beautify.22 三.3）；bounds 正被 CA 动画驱动时跳过，交 displayLink。
+// displayLink 路径一律 presentation 优先（TXT 三.1/三.2）。
+static void axs_ring_syncDriver2(AXSRingLinkDriver *driver, BOOL preferModel) {
     UIView *container = driver.container;
     if (container == nil || driver.ring == nil) return;
-    if (container.window == nil) return; // 离层：等 0.5s 扫描 detach
+    if (container.window == nil) return; // 离层：等扫描/布局钩子 detach
     @try {
         double lineWidth = axs_ring_thickness();
         if (lineWidth < 0.5) lineWidth = 0.5;
 
-        // 弹簧进行中读 presentation（视觉矩形），静止时 presentation == model
-        CALayer *pres = container.layer.presentationLayer;
-        CGRect bounds = (pres != nil) ? pres.bounds : container.layer.bounds;
+        CALayer *mount = driver.realLayer ?: container.layer;
+        // 真实裁剪层是后来才定位到的情形：把环迁挂过去（TXT beautify.22 二.1）
+        if (driver.ring.superlayer != mount) {
+            [driver.ring removeFromSuperlayer];
+            [mount addSublayer:driver.ring];
+        }
+
+        // 几何源：右/下边 = 原点+尺寸，必须取挂载层的实时矩形，不能只刷宽高
+        CGRect bounds;
+        if (preferModel) {
+            if ([mount animationForKey:@"bounds"] != nil
+                || [mount animationForKey:@"position"] != nil) {
+                return;                          // 弹簧动画进行中：displayLink 按 presentation 跟
+            }
+            bounds = mount.bounds;
+        } else {
+            CALayer *pres = mount.presentationLayer;   // 视觉矩形，静止时 == model
+            bounds = (pres != nil) ? pres.bounds : mount.bounds;
+        }
         if (bounds.size.width < 20 || bounds.size.height < 20) return;
 
         // 圆角取值（TXT beautify.21 三）：overlay mask 是手势命中区裁剪，
@@ -465,6 +485,11 @@ static void axs_ring_syncDriver(AXSRingLinkDriver *driver) {
     }
 }
 
+// displayLink 路径：presentation 优先（TXT beautify.22 三.1）
+static void axs_ring_syncDriver(AXSRingLinkDriver *driver) {
+    axs_ring_syncDriver2(driver, NO);
+}
+
 // --- attach / detach（成员扫描触发） ------------------------------------------
 
 static void axs_ring_attachContainer(UIView *container) {
@@ -472,11 +497,21 @@ static void axs_ring_attachContainer(UIView *container) {
     if (axs_ring_drivers[key] != nil) return;
     if (!axs_ring_enabled()) return;
 
+    AXSRingLinkDriver *driver = [AXSRingLinkDriver new];
+    driver.container = container;
+    driver.overlay = axs_ring_findOverlay(container);
+
+    // 先定位真实裁剪层（环的挂载层 + 圆角来源），再选整框 overlay mask 作
+    // 兜底/对照（此刻环尚未入树，无需跳过 ownRing）；未命中不落 radius=-1
+    axs_ring_selectMask(driver, container);
+    axs_ring_findRealClip(driver, container);
+    CALayer *mount = driver.realLayer ?: container.layer;
+
     CALayer *ring = [CALayer layer];
     ring.name = AXS_RING_LAYER_NAME;
-    ring.frame = container.layer.bounds;
+    ring.frame = mount.bounds;
     ring.masksToBounds = NO;
-    // 环层位置随容器（addSublayer 即在最上层），不另设 zPosition 偏移
+    // 环随挂载层原点 (0,0) 对齐，不另设偏移（TXT beautify.22 二.3）
 
     CAShapeLayer *shape = [CAShapeLayer layer];
     shape.fillColor = nil;                   // 只当遮罩用
@@ -485,19 +520,11 @@ static void axs_ring_attachContainer(UIView *container) {
 
     CAGradientLayer *grad = axs_ring_makeGradient(axs_ring_customColor(), axs_ring_color());
     [ring addSublayer:grad];
-    [container.layer addSublayer:ring];      // 宿主容器图层最上层
+    [mount addSublayer:ring];                // 挂真实裁剪层（TXT beautify.22 二.1）
 
-    AXSRingLinkDriver *driver = [AXSRingLinkDriver new];
-    driver.container = container;
     driver.ring = ring;
     driver.shape = shape;
     driver.gradient = grad;
-    driver.overlay = axs_ring_findOverlay(container);
-
-    // TXT beautify.21：先选整框 overlay mask（兜底/对照），再找真实裁剪层
-    // （圆角来源）；未命中不落 radius=-1，同步链会回退 overlay 原值/配置值
-    axs_ring_selectMask(driver, container);
-    axs_ring_findRealClip(driver, container);
 
     driver.link = [CADisplayLink displayLinkWithTarget:driver selector:@selector(tick)];
     [driver.link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
@@ -528,14 +555,14 @@ static void axs_ring_attachContainer(UIView *container) {
     if (!driver.loggedAttach) {
         driver.loggedAttach = YES;
         NSString *curve = @"n/a";
-        if (driver.realLayer != nil && [driver.realLayer respondsToSelector:@selector(cornerCurve)]) {
-            NSString *c = [(id)driver.realLayer cornerCurve];
+        if (mount != nil && [mount respondsToSelector:@selector(cornerCurve)]) {
+            NSString *c = [(id)mount cornerCurve];
             if ([c isKindOfClass:[NSString class]]) curve = c;
         }
-        axs_ring_log(@"ring attach: scan container=%p containerLayer=%p bounds=%@ corner=%.1f overlayR=%.1f rRing=%.1f source=%@ curve=%@",
-                     container, container.layer, NSStringFromCGRect(container.layer.bounds),
-                     driver.realLayer ? driver.realLayer.cornerRadius : 0.0,
-                     driver.overlayR, driver.lastRadius,
+        axs_ring_log(@"ring attach: scan container=%p mount=%@ mountFrame=%@ mountBounds=%@ corner=%.1f overlayR=%.1f rRing=%.1f source=%@ curve=%@",
+                     container, NSStringFromClass(mount.class),
+                     NSStringFromCGRect(mount.frame), NSStringFromCGRect(mount.bounds),
+                     mount.cornerRadius, driver.overlayR, driver.lastRadius,
                      driver.radiusSource ?: @"config", curve);
     }
 }
@@ -616,8 +643,13 @@ static void axs_ring_hook_layoutSubviews(id self, SEL _cmd) {
         UIView *container = (UIView *)self;
         if (container.window == nil) return;
         NSString *key = [NSString stringWithFormat:@"%p", container];
-        if (axs_ring_drivers[key] == nil) {
-            axs_ring_attachContainer(container);
+        AXSRingLinkDriver *d = axs_ring_drivers[key];
+        if (d == nil) {
+            axs_ring_attachContainer(container);   // 重建的新容器立即挂环
+        } else {
+            // 手势改 bounds 触发的布局：模型即最新值，环与卡片同 commit 生效，
+            // 右/下边（origin+size）不再滞后一帧（TXT beautify.22 三.3）
+            axs_ring_syncDriver2(d, YES);
         }
     } @catch (NSException *exception) {
         // 布局路径上绝不抛异常
