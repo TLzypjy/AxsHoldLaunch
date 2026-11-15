@@ -31,7 +31,11 @@
 
 #define AXS_RING_LOG_PATH @"/var/mobile/Documents/sc-ring.log"
 
+@class AXSRingLinkDriver;
+
 static void axs_ring_scanTick(void);
+static void axs_ring_syncContainer(UIView *container, AXSRingLinkDriver *driver);
+static NSTimer *axs_ring_scanTimer = nil;
 
 // --- logging: single append-only file --------------------------------------
 
