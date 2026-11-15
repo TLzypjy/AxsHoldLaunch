@@ -200,7 +200,10 @@ static void axs_ring_pathApplier(void *info, const CGPathElement *element) {
 
 static CGFloat axs_ring_radiusFromPath(CGPathRef path) {
     if (path == nil) return 0;
-    AXSRingPathCtx ctx = { 0, CGPointZero, NO };
+    AXSRingPathCtx ctx;
+    ctx.radius = 0;
+    ctx.from = CGPointZero;
+    ctx.started = NO;
     CGPathApply(path, &ctx, axs_ring_pathApplier);
     return ctx.radius;
 }
@@ -307,7 +310,6 @@ static void axs_ring_collectIvarMasks(UIView *view, int depth, NSMutableArray *o
 @end
 
 static NSMutableDictionary<NSString *, AXSRingLinkDriver *> *axs_ring_drivers = nil;
-static AXSRingHealthTarget *axs_ring_healthTarget = nil;
 
 // 容器子树里找 interaction overlay（一层即中，找不到再进一层）
 static UIView *axs_ring_findOverlay(UIView *container) {
@@ -347,7 +349,6 @@ static void axs_ring_syncDriver(AXSRingLinkDriver *driver) {
         CAShapeLayer *best = nil;
         CGRect bestRect = CGRectZero;
         CGFloat bestScore = 1e9;
-        CGFloat bestRadius = 0;
         for (AXSRingMaskCandidate *c in candidates) {
             CGFloat score = fabs(c.rect.size.width - ringBounds.size.width)
                           + fabs(c.rect.size.height - ringBounds.size.height);
@@ -355,7 +356,6 @@ static void axs_ring_syncDriver(AXSRingLinkDriver *driver) {
                 bestScore = score;
                 best = c.maskLayer;
                 bestRect = c.rect;
-                bestRadius = c.radius;
             }
         }
 
