@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="2.0.5+beautify.19"
+VERSION="2.0.5+beautify.20"
 BASE_DEB="base/com.susudear.screencore_2.0.5+holdpress.1.deb"
 OUT="out"
 PKG="$OUT/pkg"
@@ -49,7 +49,7 @@ SIZE=$(find "$PKG" -type f -not -path "*/DEBIAN/*" -exec stat -f%z {} + | awk '{
     echo "Package: com.susudear.screencore"
     echo "Name: ScreenCore"
     echo "Description: 分屏而已"
-    echo " 回退爆框：恢复稳定圆角矩形描边；掩码选择只认整框 mask（bbox=容器+43.18pt），半径逐帧重读其当前 path。"
+    echo " 角隙修复：mask 半径按矩形比例换算到容器矩形（两轴取小），路径矩形=容器 bounds 不内缩；掩码只认 origin(0,0) 整框，presentation 逐帧。"
     echo "Maintainer: SuSu"
     echo "Author: SuSu"
     echo "Icon: https://repo.susubaby.cn/icons/ScreenCore.png"
@@ -97,6 +97,7 @@ check "dylib has scan attach log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dy
 check "dylib has scan detach log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring detach: scan container=%p'"
 check "dylib has displayLink driver" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'AXSRingLinkDriver'"
 check "dylib has whole-frame mask probe" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring probe: mask class=%@ bbox=%@ radius=%.1f'"
+check "dylib has radius conversion attach fields" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'rMask=%.1f rRing=%.1f source=%@'"
 check "dylib has no AXSRingFrame class" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'AXSRingFrame') -eq 0"
 check "dylib has no transform rotation marquee" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'transform.rotation.z') -eq 0"
 check "dylib has no fullscreen selectors" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -Ec 'sc_handleFullscreenTap|sc_floatingContainerViewDidRequestFullscreen|promoteSceneToFullscreen') -eq 0"
