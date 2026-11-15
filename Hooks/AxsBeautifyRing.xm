@@ -242,9 +242,9 @@ static void axs_ring_collectMasks(UIView *view, int depth, NSMutableArray<CAShap
 @property (nonatomic, assign) CGFloat lastRadius;
 @property (nonatomic, assign) CGFloat lastLineWidth;
 @property (nonatomic, assign) BOOL loggedAttach;
-// TXT 四.1：圆角基准持久保存（attach 时从 overlayMask 解析），每帧按宽度比例换算
-@property (nonatomic, assign) CGFloat maskRadius;       // overlayMask 圆角
-@property (nonatomic, assign) CGFloat maskWidth;        // mask 路径基准宽度
+// TXT 四.1：圆角基准持久保存（attach 时从 overlayMask 解析）；每帧直接跟随
+// 当前 mask 半径（不做宽度线性换算——放大时线性换算会把圆角放大过头）
+@property (nonatomic, assign) CGFloat maskRadius;       // 最近一次 overlayMask 半径
 @property (nonatomic, copy) NSString *radiusSource;     // overlayMask|config
 - (void)tick;
 @end
@@ -284,11 +284,12 @@ static void axs_ring_syncContainer(UIView *container, AXSRingLinkDriver *driver)
         CGRect bounds = (pres != nil) ? pres.bounds : container.layer.bounds;
         if (bounds.size.width < 20 || bounds.size.height < 20) return;
 
-        // 圆角（TXT 四.3）：基准 = attach 时解析的 maskRadius，按当前宽度比例
-        // 换算；每帧尝试重新枚举 overlay 的 mask 刷新基准，枚举失败沿用缓存；
-        // 任何路径下圆角不得为 0（0 = 直角）
+        // 圆角（TXT 三.1）：每帧重新枚举 overlay/region 的 CAShapeLayer mask，
+        // 直接读取当前半径——mask 随浮窗尺寸更新，环跟它走；取不到才用缓存，
+        // 缓存不做宽度线性换算（线性换算在放大时会把圆角放大过头 → 四角留空）
         UIView *overlay = driver.overlay ?: axs_ring_findOverlay(container);
         driver.overlay = overlay;
+        CGFloat radius = -1;
         if (overlay != nil) {
             NSMutableArray<CAShapeLayer *> *masks = [NSMutableArray array];
             axs_ring_collectMasks(overlay, 0, masks);
@@ -301,18 +302,15 @@ static void axs_ring_syncContainer(UIView *container, AXSRingLinkDriver *driver)
                     CGFloat r = axs_ring_radiusFromPath(m.path);
                     if (r > 0.5) {
                         driver.maskRadius = r;
-                        driver.maskWidth = bb.size.width;
                         driver.radiusSource = @"overlayMask";
+                        radius = r;
                     }
                     break;
                 }
             }
         }
-        CGFloat radius = driver.lastRadius;
-        if (driver.maskRadius > 0.5 && driver.maskWidth > 0.5) {
-            radius = driver.maskRadius * (CGFloat)(bounds.size.width / driver.maskWidth);
-        }
-        if (radius < 1.0) radius = (driver.lastRadius > 0.5) ? driver.lastRadius : (CGFloat)axs_ring_configRadius();
+        if (radius < 0.5) radius = driver.lastRadius;                // 枚举失败：沿用缓存（不换算）
+        if (radius < 0.5) radius = (CGFloat)axs_ring_configRadius(); // 最终兜底
 
         BOOL changed = !CGRectEqualToRect(bounds, driver.lastBounds)
                     || fabs(driver.lastRadius - radius) > 0.05
@@ -372,7 +370,7 @@ static void axs_ring_attachContainer(UIView *container) {
 
     // TXT 四.2：圆角来源——枚举 overlay/region 视图的 CAShapeLayer mask，
     // 选与容器几何（含 21.59pt 外边距）一致者；取不到才回退 config。
-    // maskRadius/maskWidth 持久保存，每帧按宽度比例换算。
+    // maskRadius 持久保存；每帧同步直接跟随当前 mask（不做宽度线性换算）。
     CGFloat expandedW = container.bounds.size.width + 43.18;  // 2 × 21.59pt 外边距
     CGFloat expandedH = container.bounds.size.height + 43.18;
     NSMutableArray<CAShapeLayer *> *masks = [NSMutableArray array];
@@ -385,7 +383,6 @@ static void axs_ring_attachContainer(UIView *container) {
             CGFloat r = axs_ring_radiusFromPath(m.path);
             if (r > 0.5) {
                 driver.maskRadius = r;
-                driver.maskWidth = bb.size.width;
                 driver.radiusSource = @"overlayMask";
                 break;
             }
@@ -393,7 +390,6 @@ static void axs_ring_attachContainer(UIView *container) {
     }
     if (driver.maskRadius < 0.5) {
         driver.maskRadius = (CGFloat)axs_ring_configRadius();
-        driver.maskWidth = container.bounds.size.width;
         driver.radiusSource = @"config";
     }
 

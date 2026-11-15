@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="2.0.5+beautify.16"
+VERSION="2.0.5+beautify.17"
 BASE_DEB="base/com.susudear.screencore_2.0.5+holdpress.1.deb"
 OUT="out"
 PKG="$OUT/pkg"
@@ -49,7 +49,7 @@ SIZE=$(find "$PKG" -type f -not -path "*/DEBIAN/*" -exec stat -f%z {} + | awk '{
     echo "Package: com.susudear.screencore"
     echo "Name: ScreenCore"
     echo "Description: 分屏而已"
-    echo " 圆角修复：maskRadius/maskWidth 随环持久保存，每帧按宽度比例换算圆角（不传 0），overlay mask 枚举成功即刷新基准。"
+    echo " 圆角修复：每帧重新枚举 overlay/region 的 CAShapeLayer mask 直接跟随当前半径（不做宽度线性换算，放大不再留空）。"
     echo "Maintainer: SuSu"
     echo "Author: SuSu"
     echo "Icon: https://repo.susubaby.cn/icons/ScreenCore.png"
