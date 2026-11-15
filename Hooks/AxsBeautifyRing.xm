@@ -108,13 +108,17 @@ static UIColor *axs_ring_color(void) {
                              [UIColor colorWithRed:0.576 green:0.890 blue:0.992 alpha:1.0]);
 }
 
-// --- 跑马灯：conic 渐变 + colors 关键帧（不旋转任何层） ----------------------
+// --- 跑马灯：conic 闭环取色 + 渐变层线性旋转（TXT beautify.24 三.3.A） --------
 
 static NSArray<UIColor *> *axs_ring_rainbow(void) {
-    // 8 段、首尾同色（conic 收口无缝）
-    return @[ [UIColor redColor], [UIColor orangeColor], [UIColor yellowColor],
-              [UIColor greenColor], [UIColor cyanColor], [UIColor blueColor],
-              [UIColor purpleColor], [UIColor redColor] ];
+    // HSB 色相均分闭环：12 段 + 首尾同色（hue 0°=360°），conic 收口无缝
+    NSMutableArray<UIColor *> *cs = [NSMutableArray array];
+    const NSUInteger steps = 12;
+    for (NSUInteger i = 0; i <= steps; i++) {
+        double hue = (double)i / (double)steps;
+        [cs addObject:[UIColor colorWithHue:hue saturation:1.0 brightness:1.0 alpha:1.0]];
+    }
+    return cs;
 }
 
 static CAGradientLayer *axs_ring_makeGradient(BOOL custom, UIColor *color) {
@@ -125,7 +129,7 @@ static CAGradientLayer *axs_ring_makeGradient(BOOL custom, UIColor *color) {
     if (custom) {
         grad.colors = @[ (__bridge id)color.CGColor, (__bridge id)color.CGColor ];
         grad.locations = @[ @0.0, @1.0 ];
-        // 静态单色细边框：不加任何动画
+        // 自定义单色：纯色环，不加任何动画（TXT beautify.24 三.4）
     } else {
         NSArray<UIColor *> *rainbow = axs_ring_rainbow();
         NSUInteger n = rainbow.count;
@@ -138,22 +142,16 @@ static CAGradientLayer *axs_ring_makeGradient(BOOL custom, UIColor *color) {
         grad.colors = colors;
         grad.locations = locations;
 
-        // 跑马灯只走 colors 关键帧：整组颜色逐段轮转，8 段 × 0.5s = 4s 一圈
-        CAKeyframeAnimation *anim = [CAKeyframeAnimation animationWithKeyPath:@"colors"];
-        NSMutableArray *values = [NSMutableArray array];
-        for (NSUInteger shift = 0; shift < n; shift++) {
-            NSMutableArray *shifted = [NSMutableArray array];
-            for (NSUInteger j = 0; j < n; j++) {
-                [shifted addObject:(__bridge id)rainbow[(j + shift) % n].CGColor];
-            }
-            [values addObject:shifted];
-        }
-        anim.values = values;
-        anim.duration = 4.0;
-        anim.repeatCount = HUGE_VALF;
-        anim.calculationMode = kCAAnimationLinear;
-        anim.removedOnCompletion = NO;
-        [grad addAnimation:anim forKey:@"axsRingMarquee"];
+        // 跑马灯 = 渐变层线性旋转 0→2π：首尾旋转值同角无缝，色环整体连续流动；
+        // colors 数组只设一次（不再做关键帧轮转，消除首尾接缝与双红段）。
+        // 环形遮罩在父层 ring.mask 上，旋转渐变子层不影响环形状
+        CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation"];
+        spin.fromValue = @0.0;
+        spin.toValue = @(M_PI * 2.0);
+        spin.duration = 4.0;
+        spin.repeatCount = HUGE_VALF;
+        spin.removedOnCompletion = NO;
+        [grad addAnimation:spin forKey:@"axsRingMarquee"];
     }
     return grad;
 }
