@@ -345,7 +345,7 @@ static void axs_ring_treeWalk(CALayer *layer, int depth) {
         NSMutableString *line = [NSMutableString string];
         for (int i = 0; i < depth; i++) [line appendString:@" "];
         id del = layer.delegate;
-        NSString *name = [del isKindOfClass:[UIView class]] ? NSStringFromClass(del.class) : cls;
+        NSString *name = [del isKindOfClass:[UIView class]] ? NSStringFromClass([del class]) : cls;
         [line appendFormat:@"%@ frame=%@ bounds=%@ corner=%.2f clips=%d",
              name, NSStringFromCGRect(layer.frame), NSStringFromCGRect(layer.bounds),
              layer.cornerRadius, layer.masksToBounds ? 1 : 0];
@@ -529,8 +529,8 @@ static void axs_ring_attachContainer(UIView *container) {
         driver.loggedAttach = YES;
         NSString *curve = @"n/a";
         if (driver.realLayer != nil && [driver.realLayer respondsToSelector:@selector(cornerCurve)]) {
-            CACornerCurve c = [(CALayer *)driver.realLayer cornerCurve];
-            curve = [(NSString *)c copy];
+            NSString *c = [(id)driver.realLayer cornerCurve];
+            if ([c isKindOfClass:[NSString class]]) curve = c;
         }
         axs_ring_log(@"ring attach: scan container=%p containerLayer=%p bounds=%@ corner=%.1f overlayR=%.1f rRing=%.1f source=%@ curve=%@",
                      container, container.layer, NSStringFromCGRect(container.layer.bounds),
