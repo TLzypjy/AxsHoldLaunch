@@ -89,12 +89,6 @@ static BOOL axs_ring_customColor(void) {
     return [v isKindOfClass:[NSNumber class]] ? [v boolValue] : NO;
 }
 
-static double axs_ring_configRadius(void) {
-    id v = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:@"splitWindowCornerRadius" defaultValue:@8.0];
-    double r = [v isKindOfClass:[NSNumber class]] ? [v doubleValue] : 8.0;
-    return axs_ring_clamp(r, 0.0, 60.0);
-}
-
 static UIColor *axs_ring_parseHex(NSString *hex, UIColor *fallback) {
     if (![hex isKindOfClass:[NSString class]] || hex.length == 0) return fallback;
     NSString *h = [[hex stringByReplacingOccurrencesOfString:@"#" withString:@""]
