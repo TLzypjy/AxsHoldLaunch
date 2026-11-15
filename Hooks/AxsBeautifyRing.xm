@@ -27,6 +27,8 @@
 #define AXS_RING_MAX_ENTRIES 4
 
 static void axs_ring_scanTick(void);
+static void axs_ring_installLayoutHook(void);           // 定义在扫描节之后
+static BOOL axs_ring_layoutHookInstalled = NO;          // scanTick / %ctor 共用
 
 // --- logging: single append-only file --------------------------------------
 
@@ -235,13 +237,12 @@ static void axs_ring_syncDriver(AXSRingLinkDriver *driver);
 @property (nonatomic, strong) CALayer *ring;            // axsRingFrame
 @property (nonatomic, strong) CAGradientLayer *gradient;
 @property (nonatomic, strong) CAShapeLayer *shape;      // ring.mask
-@property (nonatomic, weak) CAShapeLayer *radiusMask;   // 选中的整框 mask（半径来源）
+@property (nonatomic, weak) CAShapeLayer *radiusMask;   // 整框 overlay mask（兜底半径来源）
 @property (nonatomic, weak) UIView *overlay;            // SCFloatingInteractionOverlayView
-@property (nonatomic, assign) CGFloat maskW;            // 选中 mask bbox 宽（选中时记录）
-@property (nonatomic, assign) CGFloat maskH;            // 选中 mask bbox 高
-@property (nonatomic, assign) CGFloat maskR;            // 选中 mask 半径（path 提取）
+@property (nonatomic, weak) CALayer *realLayer;         // 真实裁剪层（bbox≈容器 bounds）
+@property (nonatomic, assign) CGFloat overlayR;         // overlay mask 当前半径（对照日志）
 @property (nonatomic, assign) CGRect lastBounds;        // 上帧应用的 presentation bounds
-@property (nonatomic, assign) CGFloat lastRadius;       // 上帧应用的换算后环圆角 rRing
+@property (nonatomic, assign) CGFloat lastRadius;       // 上帧应用的环圆角
 @property (nonatomic, assign) CGFloat lastLineWidth;
 @property (nonatomic, copy) NSString *radiusSource;     // overlayMask|config
 @property (nonatomic, assign) BOOL loggedAttach;
@@ -269,9 +270,9 @@ static UIView *axs_ring_findOverlay(UIView *container) {
     return nil;
 }
 
-// 掩码选择（TXT beautify.20 三.2）：只认整框 mask——bbox 原点≈(0,0) 且
+// 掩码选择（TXT beautify.21 三.1.c）：整框 overlay mask——bbox 原点≈(0,0) 且
 // 尺寸≈容器宽高+43.18pt；原点带负坐标的是角区/边条局部 mask，一律跳过。
-// 命中即记录 mw/mh/rMask 供半径换算；同一份候选同时供 probe 留档。
+// 它是手势命中区裁剪，半径只作兜底与对照，不再做任何缩放换算。
 static BOOL axs_ring_selectMask(AXSRingLinkDriver *driver, UIView *container) {
     CGFloat expandedW = container.bounds.size.width + 43.18;
     CGFloat expandedH = container.bounds.size.height + 43.18;
@@ -284,13 +285,94 @@ static BOOL axs_ring_selectMask(AXSRingLinkDriver *driver, UIView *container) {
         if (fabs(bb.origin.x) < 0.5 && fabs(bb.origin.y) < 0.5
             && fabs(bb.size.width - expandedW) < 8 && fabs(bb.size.height - expandedH) < 8) {
             driver.radiusMask = m;
-            driver.maskW = bb.size.width;
-            driver.maskH = bb.size.height;
-            driver.maskR = axs_ring_radiusFromPath(m.path);
+            driver.overlayR = axs_ring_radiusFromPath(m.path);
             return YES;
         }
     }
     return NO;
+}
+
+// 真实裁剪层查找（TXT beautify.21 二.2）：在容器 layer 子树里找 bounds ≈
+// 容器 bounds 的裁剪层（masksToBounds / 挂 mask / cornerRadius>0.5），
+// 它的 cornerRadius 或自身 mask 半径才是黑窗真实圆角；跳过环自己的子树；
+// 容器子树找不到再看一层 superview 子树。
+static void axs_ring_walkClip(CALayer *layer, CGRect target, CALayer *ownRing, int depth,
+                              CALayer **best, CGFloat *bestScore) {
+    if (layer == nil || depth > 6) return;
+    if (layer != ownRing) {
+        CGRect b = layer.bounds;
+        if (b.size.width > 20 && fabs(b.size.width - target.size.width) < 2
+            && fabs(b.size.height - target.size.height) < 2) {
+            BOOL clipper = layer.masksToBounds || layer.mask != nil || layer.cornerRadius > 0.5;
+            if (clipper) {
+                CGFloat score = (layer.cornerRadius > 0.5 ? 0.0 : 10.0)
+                              + (layer.masksToBounds ? 0.0 : 5.0) + (CGFloat)depth * 0.1;
+                if (score < *bestScore) { *bestScore = score; *best = layer; }
+            }
+        }
+    }
+    for (CALayer *sub in layer.sublayers) {
+        axs_ring_walkClip(sub, target, ownRing, depth + 1, best, bestScore);
+    }
+}
+
+static BOOL axs_ring_findRealClip(AXSRingLinkDriver *driver, UIView *container) {
+    CALayer *best = nil;
+    CGFloat bestScore = 1e9;
+    axs_ring_walkClip(container.layer, container.bounds, driver.ring, 0, &best, &bestScore);
+    if (best == nil && container.superview != nil) {
+        bestScore = 1e9;
+        axs_ring_walkClip(container.superview.layer, container.bounds, driver.ring, 0, &best, &bestScore);
+    }
+    driver.realLayer = best;
+    return (best != nil);
+}
+
+// 全树一次性探针（TXT beautify.21 二）：从容器所在 window 的 layer 树递归
+// 遍历，记录 SC*/_UI*/裁剪层的几何、cornerRadius、mask bbox/半径，定位
+// 真实圆角来源；进程内只跑一次，不每帧写日志。
+static int axs_ring_treeLines = 0;
+
+static void axs_ring_treeWalk(CALayer *layer, int depth) {
+    if (layer == nil || depth > 10 || axs_ring_treeLines > 140) return;
+    NSString *cls = NSStringFromClass(layer.class);
+    CAShapeLayer *m = [layer.mask isKindOfClass:[CAShapeLayer class]] ? (CAShapeLayer *)layer.mask : nil;
+    BOOL interesting = [cls hasPrefix:@"SC"] || [cls hasPrefix:@"_UI"]
+                       || layer.cornerRadius > 0.5 || layer.masksToBounds
+                       || (m != nil && m.path != nil);
+    if (interesting) {
+        axs_ring_treeLines++;
+        NSMutableString *line = [NSMutableString string];
+        for (int i = 0; i < depth; i++) [line appendString:@" "];
+        id del = layer.delegate;
+        NSString *name = [del isKindOfClass:[UIView class]] ? NSStringFromClass(del.class) : cls;
+        [line appendFormat:@"%@ frame=%@ bounds=%@ corner=%.2f clips=%d",
+             name, NSStringFromCGRect(layer.frame), NSStringFromCGRect(layer.bounds),
+             layer.cornerRadius, layer.masksToBounds ? 1 : 0];
+        if (m != nil && m.path != nil) {
+            [line appendFormat:@" maskBbox=%@ maskR=%.1f",
+                 NSStringFromCGRect(CGPathGetBoundingBox(m.path)), axs_ring_radiusFromPath(m.path)];
+        } else if (layer.mask != nil) {
+            [line appendFormat:@" mask=%@", NSStringFromClass(layer.mask.class)];
+        }
+        axs_ring_log(@"ring tree: %@", line);
+    }
+    for (CALayer *sub in layer.sublayers) {
+        axs_ring_treeWalk(sub, depth + 1);
+    }
+}
+
+static BOOL axs_ring_treeProbed = NO;
+
+static void axs_ring_treeProbe(UIView *container) {
+    if (axs_ring_treeProbed) return;
+    axs_ring_treeProbed = YES;
+    UIWindow *w = container.window;
+    if (w == nil) return;
+    axs_ring_treeLines = 0;
+    axs_ring_log(@"ring tree: window=%@ frame=%@ bounds=%@",
+                 NSStringFromClass(w.class), NSStringFromCGRect(w.frame), NSStringFromCGRect(w.bounds));
+    axs_ring_treeWalk(w.layer, 0);
 }
 
 // --- 几何同步（displayLink 每帧调用；静止即跳过） -----------------------------
@@ -308,35 +390,53 @@ static void axs_ring_syncDriver(AXSRingLinkDriver *driver) {
         CGRect bounds = (pres != nil) ? pres.bounds : container.layer.bounds;
         if (bounds.size.width < 20 || bounds.size.height < 20) return;
 
-        // 圆角换算（TXT beautify.20 三.1）：mask 半径属于「外扩 43.18pt 的
-        // overlay 矩形」，环画在容器矩形上必须按矩形比例换算——
-        //   rRing = min(rMask×W/mw, rMask×H/mh)
-        // 逐帧从选中 mask 的当前 path 重读 mw/mh/rMask（ScreenCore 随窗口尺寸
-        // 更新它，环跟它走）；mask 缺失时补选一次，仍未命中回退配置圆角
-        CGFloat radius = driver.lastRadius;
-        if (driver.radiusMask == nil || driver.radiusMask.path == nil) {
-            axs_ring_selectMask(driver, container);
+        // 圆角取值（TXT beautify.21 三）：overlay mask 是手势命中区裁剪，
+        // 不是黑窗内容的真实圆角（外扩矩形缩半径方向错了）——优先级改为：
+        //   a) 真实裁剪层 layer.cornerRadius；
+        //   b) 该层自身 mask 的圆角（按其自身 bbox 换算）；
+        //   c) overlay 整框 mask 半径原值（不做 mw/mh 缩放）；
+        //   d) 配置圆角。逐帧重读，静止由 changed 检查跳过。
+        CGFloat radius = 0;
+        NSString *source = @"config";
+        if (driver.realLayer == nil) axs_ring_findRealClip(driver, container);
+        if (driver.realLayer != nil && driver.realLayer.cornerRadius > 0.5) {
+            radius = driver.realLayer.cornerRadius;
+            source = @"realCorner";
         }
-        if (driver.radiusMask != nil && driver.radiusMask.path != nil) {
-            CGPathRef mp = driver.radiusMask.path;
-            CGRect bb = CGPathGetBoundingBox(mp);
-            CGFloat rMask = axs_ring_radiusFromPath(mp);
-            if (rMask > 0.5 && bb.size.width > 1.0 && bb.size.height > 1.0) {
-                CGFloat kx = bounds.size.width / bb.size.width;
-                CGFloat ky = bounds.size.height / bb.size.height;
-                radius = (CGFloat)MIN(rMask * kx, rMask * ky);
-                driver.maskW = bb.size.width;
-                driver.maskH = bb.size.height;
-                driver.maskR = rMask;
-                driver.radiusSource = @"overlayMask";
-            } else if (radius <= 0.5) {
-                radius = (CGFloat)axs_ring_configRadius();
-                driver.radiusSource = @"config";
+        if (radius <= 0.5 && driver.realLayer != nil) {
+            CAShapeLayer *rm = [driver.realLayer.mask isKindOfClass:[CAShapeLayer class]]
+                                   ? (CAShapeLayer *)driver.realLayer.mask : nil;
+            if (rm != nil && rm.path != nil) {
+                CGRect bb = CGPathGetBoundingBox(rm.path);
+                CGRect lb = driver.realLayer.bounds;
+                CGFloat rMask = axs_ring_radiusFromPath(rm.path);
+                if (rMask > 0.5 && bb.size.width > 1.0 && bb.size.height > 1.0
+                    && lb.size.width > 1.0 && lb.size.height > 1.0) {
+                    CGFloat kx = lb.size.width / bb.size.width;
+                    CGFloat ky = lb.size.height / bb.size.height;
+                    CGFloat rr = (CGFloat)MIN(rMask * kx, rMask * ky);
+                    if (rr > 0.5) { radius = rr; source = @"realMask"; }
+                }
             }
-        } else if (radius <= 0.5) {
-            radius = (CGFloat)axs_ring_configRadius();
-            driver.radiusSource = @"config";
         }
+        if (radius <= 0.5) {
+            if (driver.radiusMask == nil || driver.radiusMask.path == nil) {
+                axs_ring_selectMask(driver, container);
+            }
+            if (driver.radiusMask != nil && driver.radiusMask.path != nil) {
+                CGFloat rMask = axs_ring_radiusFromPath(driver.radiusMask.path);
+                if (rMask > 0.5) {
+                    radius = rMask;             // 原值直用，不再缩放（TXT 三.1.c）
+                    source = @"overlayMask";
+                    driver.overlayR = rMask;
+                }
+            }
+        }
+        if (radius <= 0.5) {
+            radius = (CGFloat)axs_ring_configRadius();
+            source = @"config";
+        }
+        driver.radiusSource = source;
 
         BOOL changed = !CGRectEqualToRect(bounds, driver.lastBounds)
                     || fabs(driver.lastRadius - radius) > 0.05
@@ -394,33 +494,49 @@ static void axs_ring_attachContainer(UIView *container) {
     driver.gradient = grad;
     driver.overlay = axs_ring_findOverlay(container);
 
-    // TXT beautify.20 三.2：掩码选择——只认整框 mask（bbox 原点 (0,0)、
-    // 尺寸=容器+43.18pt），跳过角区/边条局部 mask；未命中不落 radius=-1，
-    // 交给同步链回退配置圆角（source=config）
+    // TXT beautify.21：先选整框 overlay mask（兜底/对照），再找真实裁剪层
+    // （圆角来源）；未命中不落 radius=-1，同步链会回退 overlay 原值/配置值
     axs_ring_selectMask(driver, container);
+    axs_ring_findRealClip(driver, container);
 
     driver.link = [CADisplayLink displayLinkWithTarget:driver selector:@selector(tick)];
     [driver.link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     axs_ring_drivers[key] = driver;
 
-    // 首帧即出几何（含一次性 probe 留档：容器 + 选中的整框 mask）
+    // 全树一次性探针（进程内仅首次 attach）：定位真实圆角来源
+    axs_ring_treeProbe(container);
+
+    // 首帧即出几何
     axs_ring_syncDriver(driver);
 
-    axs_ring_log(@"ring probe: container class=%@ bounds=%@",
-                 NSStringFromClass(container.class), NSStringFromCGRect(container.bounds));
-    if (driver.radiusMask != nil && driver.radiusMask.path != nil) {
+    axs_ring_log(@"ring probe: container class=%@ bounds=%@ realLayer=%@ corner=%.2f",
+                 NSStringFromClass(container.class), NSStringFromCGRect(container.bounds),
+                 driver.realLayer ? NSStringFromClass(driver.realLayer.class) : @"none",
+                 driver.realLayer ? driver.realLayer.cornerRadius : 0.0);
+    CAShapeLayer *probeMask = nil;
+    if (driver.realLayer != nil && [driver.realLayer.mask isKindOfClass:[CAShapeLayer class]]) {
+        probeMask = (CAShapeLayer *)driver.realLayer.mask;
+    }
+    if (probeMask == nil || probeMask.path == nil) probeMask = driver.radiusMask;
+    if (probeMask != nil && probeMask.path != nil) {
         axs_ring_log(@"ring probe: mask class=%@ bbox=%@ radius=%.1f",
-                     NSStringFromClass(driver.radiusMask.class),
-                     NSStringFromCGRect(CGPathGetBoundingBox(driver.radiusMask.path)),
-                     driver.maskR);
+                     NSStringFromClass(probeMask.class),
+                     NSStringFromCGRect(CGPathGetBoundingBox(probeMask.path)),
+                     axs_ring_radiusFromPath(probeMask.path));
     }
 
     if (!driver.loggedAttach) {
         driver.loggedAttach = YES;
-        axs_ring_log(@"ring attach: scan container=%p containerLayer=%p bounds=%@ mw=%.2f mh=%.2f rMask=%.1f rRing=%.1f source=%@",
+        NSString *curve = @"n/a";
+        if (driver.realLayer != nil && [driver.realLayer respondsToSelector:@selector(cornerCurve)]) {
+            CACornerCurve c = [(CALayer *)driver.realLayer cornerCurve];
+            curve = [(NSString *)c copy];
+        }
+        axs_ring_log(@"ring attach: scan container=%p containerLayer=%p bounds=%@ corner=%.1f overlayR=%.1f rRing=%.1f source=%@ curve=%@",
                      container, container.layer, NSStringFromCGRect(container.layer.bounds),
-                     driver.maskW, driver.maskH, driver.maskR, driver.lastRadius,
-                     driver.radiusSource ?: @"config");
+                     driver.realLayer ? driver.realLayer.cornerRadius : 0.0,
+                     driver.overlayR, driver.lastRadius,
+                     driver.radiusSource ?: @"config", curve);
     }
 }
 
@@ -450,6 +566,7 @@ static void axs_ring_collectContainers(UIView *view, NSMutableArray *out, int de
 
 static void axs_ring_scanTick(void) {
     @try {
+        if (!axs_ring_layoutHookInstalled) axs_ring_installLayoutHook(); // 类可能晚于 %ctor 注册
         NSMutableArray *live = [NSMutableArray array];
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
@@ -485,6 +602,47 @@ static void axs_ring_scanTick(void) {
     }
 }
 
+// --- resize 加速（TXT beautify.21 四.1）：hook SCFloatingContainerView 的
+// layoutSubviews（UIKit 方法，不 hook 任何 sc_ 会话选择子）——resize 中
+// ScreenCore 反复重建容器，新容器首次布局时立即挂环，不再等 0.5s 扫描；
+// 在册容器照旧由各自 displayLink 驱动。
+
+static void (*axs_ring_orig_layoutSubviews)(id, SEL);
+
+static void axs_ring_hook_layoutSubviews(id self, SEL _cmd) {
+    axs_ring_orig_layoutSubviews(self, _cmd);
+    @try {
+        if (axs_ring_drivers == nil) return;
+        UIView *container = (UIView *)self;
+        if (container.window == nil) return;
+        NSString *key = [NSString stringWithFormat:@"%p", container];
+        if (axs_ring_drivers[key] == nil) {
+            axs_ring_attachContainer(container);
+        }
+    } @catch (NSException *exception) {
+        // 布局路径上绝不抛异常
+    }
+}
+
+static void axs_ring_installLayoutHook(void) {
+    if (axs_ring_layoutHookInstalled) return;
+    Class cls = objc_getClass("SCFloatingContainerView");
+    if (cls == nil) return;
+    SEL sel = @selector(layoutSubviews);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (m == nil) return;
+    // 先记原 IMP（可能是父类实现），再给本类加覆盖或替换本类 IMP——
+    // 只影响 SCFloatingContainerView，不动 UIView
+    axs_ring_orig_layoutSubviews = (void (*)(id, SEL))method_getImplementation(m);
+    if (class_addMethod(cls, sel, (IMP)axs_ring_hook_layoutSubviews, method_getTypeEncoding(m))) {
+        axs_ring_layoutHookInstalled = YES;
+    } else {
+        method_setImplementation(m, (IMP)axs_ring_hook_layoutSubviews);
+        axs_ring_layoutHookInstalled = YES;
+    }
+    axs_ring_log(@"ring layout hook installed on SCFloatingContainerView");
+}
+
 // --- 通知 / 定时器目标 ----------------------------------------------------------
 
 @interface AXSRingHealthTarget : NSObject
@@ -514,8 +672,10 @@ static void axs_ring_prefsChanged(CFNotificationCenterRef center, void *observer
         if (objc_getClass("SpringBoard") != nil) {
             axs_ring_drivers = [NSMutableDictionary new];
             axs_ring_healthTarget = [AXSRingHealthTarget new];
+            axs_ring_installLayoutHook();        // 类已注册则立即装钩，未注册由扫描重试
             axs_ring_log(@"ring module loaded in SpringBoard");
-            axs_ring_log(@"ring hooks ring=0 sessionHooks=0 holdPress=1");
+            axs_ring_log(@"ring hooks ring=0 sessionHooks=0 layout=%d holdPress=1",
+                         axs_ring_layoutHookInstalled ? 1 : 0);
 
             // 设置保存通知：开关变化立即生效
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
