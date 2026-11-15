@@ -4,41 +4,29 @@
 #import "AxsHoldLaunchPreferences.h"
 
 // ---------------------------------------------------------------------------
-// 美化 · 光圈外框 (ring frame, beautify.18) — 描边路径直接复用 mask 原始 CGPath
+// 美化 · 光圈外框 (ring frame, beautify.19) — 稳定圆角矩形描边 + 整框 mask 半径
 //
-// beautify.17 lesson: even with the correct radius read from the overlay mask,
-// redrawing the path with bezierPathWithRoundedRect: produces a circular-arc
-// corner that differs from ScreenCore's original mask curve (continuous corner
-// / squircle) - a small gap remained at the four corners.
+// beautify.18 lesson: reusing the region/overlay masks' local CGPath directly
+// exploded (paths carry -21.59 offsets and local 52×105 geometries; multiple
+// partial paths concatenated; attach enumeration raced to radius=-1).
 //
-// This version STOPS redrawing: the stroke layer's path IS the current
-// overlay/region mask CGPath, transformed (translate + inset scale) into the
-// ring layer's coordinate space. The corner curve character is preserved by
-// the affine transform, so the ring's corners match the window exactly by
-// construction.
-//
-//   container.layer
-//     ├─ (existing content)
-//     ├─ interaction overlay / regions (ScreenCore's own masks live here)
-//     └─ axsRingFrame (CALayer; added last; no zPosition offset)
-//          ├─ axsRingGradient (conic; marquee = colors keyframes)
-//          └─ mask = axsRingShape (path = 复用的 mask CGPath, 内缩 lineWidth/2)
-//
-// Membership (attach/detach) comes from the 0.5s scan + window notifications
-// (zero session hooks); geometry sync runs on a per-container displayLink.
+// This version (beautify.16 stable structure + fixes):
+//   - zero session hooks; the 0.5s scan + window notifications do membership
+//     only (attach/detach); geometry syncs on a per-container displayLink;
+//   - the stroke is a stable rounded rect: rect = container presentation
+//     bounds inset lineWidth/2, radius = the SELECTED whole-frame mask's
+//     radius (bbox == container + 43.18pt margins), re-read per frame from
+//     the cached mask layer (it tracks the window size), config fallback;
+//   - the overlay mask path's -21.59 offset is NOT borrowed - only its radius;
+//   - one stroke = one whole-frame path; ring transform identity.
 // ---------------------------------------------------------------------------
 
 #define AXS_RING_LOG_PATH @"/var/mobile/Documents/sc-ring.log"
 #define AXS_RING_LAYER_NAME @"axsRingFrame"
 #define AXS_RING_GRADIENT_NAME @"axsRingGradient"
-#define AXS_RING_OVERLAY_MARGIN (43.18)   // 2 × 21.59pt 外边距
-#define AXS_RING_MAX_DEPTH 6
-
-@class AXSRingLinkDriver;
+#define AXS_RING_MAX_ENTRIES 4
 
 static void axs_ring_scanTick(void);
-static void axs_ring_syncDriver(AXSRingLinkDriver *driver);
-static NSTimer *axs_ring_scanTimer = nil;
 
 // --- logging: single append-only file --------------------------------------
 
@@ -87,6 +75,12 @@ static double axs_ring_thickness(void) {
 static BOOL axs_ring_customColor(void) {
     id v = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:@"splitBeautifyRingCustomColorEnabled" defaultValue:@NO];
     return [v isKindOfClass:[NSNumber class]] ? [v boolValue] : NO;
+}
+
+static double axs_ring_configRadius(void) {
+    id v = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:@"splitWindowCornerRadius" defaultValue:@8.0];
+    double r = [v isKindOfClass:[NSNumber class]] ? [v doubleValue] : 8.0;
+    return axs_ring_clamp(r, 0.0, 60.0);
 }
 
 static UIColor *axs_ring_parseHex(NSString *hex, UIColor *fallback) {
@@ -194,59 +188,12 @@ static void axs_ring_pathApplier(void *info, const CGPathElement *element) {
 
 static CGFloat axs_ring_radiusFromPath(CGPathRef path) {
     if (path == nil) return 0;
-    AXSRingPathCtx ctx;
-    ctx.radius = 0;
-    ctx.from = CGPointZero;
-    ctx.started = NO;
+    AXSRingPathCtx ctx = { 0, CGPointZero, NO };
     CGPathApply(path, &ctx, axs_ring_pathApplier);
     return ctx.radius;
 }
 
-// --- mask 候选收集（只读；ring 模块零 addSubview/零 UIView） ------------------
-
-@interface AXSRingMaskCandidate : NSObject
-@property (nonatomic, strong) CAShapeLayer *maskLayer;  // 候选遮罩
-@property (nonatomic, assign) CGRect rect;              // path bbox 映射到容器层坐标
-@property (nonatomic, assign) CGFloat radius;           // 路径提取半径
-@end
-@implementation AXSRingMaskCandidate
-@end
-
-// mask 层的 path bbox 映射到容器层坐标（沿 superlayer 链累计 frame origin）
-static CGRect axs_ring_maskRectInContainer(CALayer *maskLayer, CALayer *containerLayer) {
-    CGPathRef p = ((CAShapeLayer *)maskLayer).path;
-    CGRect rect = p ? CGPathGetBoundingBox(p) : CGRectZero;
-    CALayer *l = maskLayer.superlayer;
-    int hops = 0;
-    while (l != nil && l != containerLayer && hops < 8) {
-        rect.origin.x += l.frame.origin.x;
-        rect.origin.y += l.frame.origin.y;
-        l = l.superlayer;
-        hops++;
-    }
-    return rect;
-}
-
-// 递归收集容器 layer 子树内全部 CAShapeLayer 遮罩候选（含 _UIScenePresentationView
-// 及其子层；跳过环自己的子树）
-static void axs_ring_collectMaskInfos(CALayer *layer, CALayer *containerLayer, int depth,
-                                      NSMutableArray *out, CALayer *ownRing) {
-    if (layer == nil || depth > AXS_RING_MAX_DEPTH) return;
-    if (layer == ownRing) return; // 不收集自己的环
-    if ([layer.mask isKindOfClass:[CAShapeLayer class]]) {
-        CAShapeLayer *m = (CAShapeLayer *)layer.mask;
-        if (m.path != nil) {
-            AXSRingMaskCandidate *c = [AXSRingMaskCandidate new];
-            c.maskLayer = m;
-            c.rect = axs_ring_maskRectInContainer(m, containerLayer);
-            c.radius = axs_ring_radiusFromPath(m.path);
-            [out addObject:c];
-        }
-    }
-    for (CALayer *sub in layer.sublayers) {
-        axs_ring_collectMaskInfos(sub, containerLayer, depth + 1, out, ownRing);
-    }
-}
+// --- 探测辅助（只读） --------------------------------------------------------
 
 // 读 CAShapeLayer 类型的 ivar（SCFloatingCornerGestureRegionView 的
 // _interactiveMaskLayer 等）
@@ -262,36 +209,34 @@ static CAShapeLayer *axs_ring_ivarShape(id obj, const char *name) {
     }
 }
 
-// ivar 遮罩也并入候选（region 视图的 _interactiveMaskLayer）
-static void axs_ring_collectIvarMasks(UIView *view, int depth, NSMutableArray *out,
-                                      CALayer *containerLayer, CALayer *ownRing) {
-    if (view == nil || depth > 3) return;
-    CAShapeLayer *im = axs_ring_ivarShape(view, "_interactiveMaskLayer");
-    if (im != nil && im.path != nil && im != ownRing) {
-        AXSRingMaskCandidate *c = [AXSRingMaskCandidate new];
-        c.maskLayer = im;
-        c.rect = axs_ring_maskRectInContainer(im, containerLayer);
-        c.radius = axs_ring_radiusFromPath(im.path);
-        [out addObject:c];
+// 递归收集子树内所有 CAShapeLayer 遮罩（layer.mask + _interactiveMaskLayer）
+static void axs_ring_collectMasks(UIView *view, int depth, NSMutableArray<CAShapeLayer *> *out) {
+    if (view == nil || depth > 4) return;
+    if ([view.layer.mask isKindOfClass:[CAShapeLayer class]]) {
+        [out addObject:(CAShapeLayer *)view.layer.mask];
     }
+    CAShapeLayer *im = axs_ring_ivarShape(view, "_interactiveMaskLayer");
+    if (im != nil && im.path != nil) [out addObject:im];
     for (UIView *sub in view.subviews) {
-        axs_ring_collectIvarMasks(sub, depth + 1, out, containerLayer, ownRing);
+        axs_ring_collectMasks(sub, depth + 1, out);
     }
 }
 
 // --- 每容器驱动（CADisplayLink 一对一；容器消失即停） -------------------------
+
+static void axs_ring_syncDriver(AXSRingLinkDriver *driver);
 
 @interface AXSRingLinkDriver : NSObject
 @property (nonatomic, weak) UIView *container;
 @property (nonatomic, strong) CADisplayLink *link;
 @property (nonatomic, strong) CALayer *ring;            // axsRingFrame
 @property (nonatomic, strong) CAGradientLayer *gradient;
-@property (nonatomic, strong) CAShapeLayer *shape;      // ring.mask（路径 = 复用的 mask CGPath）
+@property (nonatomic, strong) CAShapeLayer *shape;      // ring.mask
+@property (nonatomic, weak) CAShapeLayer *radiusMask;   // 选中的整框 mask（半径来源）
 @property (nonatomic, weak) UIView *overlay;            // SCFloatingInteractionOverlayView
-@property (nonatomic, assign) CGRect lastRect;          // 上帧应用的描边矩形（容器坐标）
-@property (nonatomic, assign) CGRect lastRingBounds;    // 上帧环 bounds
-@property (nonatomic, assign) CGFloat lastLineWidth;
+@property (nonatomic, assign) CGRect lastBounds;        // 上帧应用的 presentation bounds
 @property (nonatomic, assign) CGFloat lastRadius;
+@property (nonatomic, assign) CGFloat lastLineWidth;
 @property (nonatomic, copy) NSString *radiusSource;     // overlayMask|config
 @property (nonatomic, assign) BOOL loggedAttach;
 - (void)tick;
@@ -304,6 +249,7 @@ static void axs_ring_collectIvarMasks(UIView *view, int depth, NSMutableArray *o
 @end
 
 static NSMutableDictionary<NSString *, AXSRingLinkDriver *> *axs_ring_drivers = nil;
+static AXSRingHealthTarget *axs_ring_healthTarget = nil;
 
 // 容器子树里找 interaction overlay（一层即中，找不到再进一层）
 static UIView *axs_ring_findOverlay(UIView *container) {
@@ -328,74 +274,45 @@ static void axs_ring_syncDriver(AXSRingLinkDriver *driver) {
         double lineWidth = axs_ring_thickness();
         if (lineWidth < 0.5) lineWidth = 0.5;
 
-        // 模型 bounds（真实尺寸变化时跟随；transform 弹簧不影响模型）
-        CGRect ringBounds = container.layer.bounds;
-        if (ringBounds.size.width < 20 || ringBounds.size.height < 20) return;
+        // 弹簧进行中读 presentation（视觉矩形），静止时 presentation == model
+        CALayer *pres = container.layer.presentationLayer;
+        CGRect bounds = (pres != nil) ? pres.bounds : container.layer.bounds;
+        if (bounds.size.width < 20 || bounds.size.height < 20) return;
 
-        // 1) 收集候选遮罩（每帧；子树小，含 _UIScenePresentationView 子层）
-        NSMutableArray *candidates = [NSMutableArray array];
-        axs_ring_collectMaskInfos(container.layer, container.layer, 0, candidates, driver.ring);
-        if (driver.overlay != nil) {
-            axs_ring_collectIvarMasks(driver.overlay, 0, candidates, container.layer, driver.ring);
+        // 圆角：选中的整框 mask 半径，逐帧从该 mask 的当前 path 重读——
+        // ScreenCore 随窗口尺寸更新它，环跟它走；取不到沿用上帧值
+        CGFloat radius = driver.lastRadius;
+        if (driver.radiusMask != nil && driver.radiusMask.path != nil) {
+            CGFloat r = axs_ring_radiusFromPath(driver.radiusMask.path);
+            if (r > 0.5) radius = r;
         }
 
-        // 2) 选择：优先 bbox 与容器 bounds 一致的 mask；外扩尺寸只作兜底
-        CAShapeLayer *best = nil;
-        CGRect bestRect = CGRectZero;
-        CGFloat bestScore = 1e9;
-        for (AXSRingMaskCandidate *c in candidates) {
-            CGFloat score = fabs(c.rect.size.width - ringBounds.size.width)
-                          + fabs(c.rect.size.height - ringBounds.size.height);
-            if (score < bestScore && c.radius > 0.5) {
-                bestScore = score;
-                best = c.maskLayer;
-                bestRect = c.rect;
-            }
-        }
-
-        // 3) 描边路径 = 复用的 mask CGPath：按线宽一半内缩（仿射变换保留角曲线）
-        CGRect insetRect = CGRectInset(bestRect, lineWidth / 2.0, lineWidth / 2.0);
-        CGFloat kx = bestRect.size.width  > 0.5 ? insetRect.size.width  / bestRect.size.width  : 1.0;
-        CGFloat ky = bestRect.size.height > 0.5 ? insetRect.size.height / bestRect.size.height : 1.0;
-        CGPoint center = CGPointMake(bestRect.origin.x + bestRect.size.width / 2.0,
-                                     bestRect.origin.y + bestRect.size.height / 2.0);
-        CGPathRef maskPath = best.path;
-        CGRect bbox = CGPathGetBoundingBox(maskPath);
-        CGAffineTransform t = CGAffineTransformMakeTranslation(bestRect.origin.x - bbox.origin.x,
-                                                               bestRect.origin.y - bbox.origin.y);
-        t = CGAffineTransformTranslate(t, center.x, center.y);
-        t = CGAffineTransformScale(t, kx, ky);
-        t = CGAffineTransformTranslate(t, -center.x, -center.y);
-        t = CGAffineTransformTranslate(t, -insetRect.origin.x, -insetRect.origin.y);
-        CGPathRef local = CGPathCreateCopyByTransformingPath(maskPath, &t);
-
-        BOOL changed = !CGRectEqualToRect(insetRect, driver.lastRect)
-                    || !CGSizeEqualToSize(ringBounds.size, driver.lastRingBounds.size)
+        BOOL changed = !CGRectEqualToRect(bounds, driver.lastBounds)
+                    || fabs(driver.lastRadius - radius) > 0.05
                     || driver.lastLineWidth != (CGFloat)lineWidth;
-
-        if (!changed) { CGPathRelease(local); return; } // 静止：bounds/路径未变跳过本帧
+        if (!changed) return; // 静止状态：bounds/圆角未变就跳过本帧刷新
 
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        driver.ring.frame = ringBounds;
-        driver.ring.bounds = CGRectMake(0, 0, insetRect.size.width, insetRect.size.height);
-        driver.ring.position = insetRect.origin;
+        driver.ring.frame = bounds;              // ringContainer.frame = 容器 bounds
         driver.shape.frame = driver.ring.bounds;
-        driver.shape.path = local;               // 复用 mask 原始几何
-        driver.shape.lineWidth = lineWidth;
+        CGRect r = CGRectInset(driver.ring.bounds, lineWidth / 2.0, lineWidth / 2.0);
+        double pathRadius = axs_ring_clamp(radius, 1.0, MAX(MIN(r.size.width, r.size.height) / 2.0, 1.0));
+        UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:pathRadius];
+        driver.shape.path = p.CGPath;
+        driver.shape.lineWidth = lineWidth;      // 描边宽度 = 配置值（固定屏幕点）
         driver.gradient.frame = driver.ring.bounds;
         [CATransaction commit];
-        CGPathRelease(local);
 
-        driver.lastRect = insetRect;
-        driver.lastRingBounds = ringBounds;
+        driver.lastBounds = bounds;
+        driver.lastRadius = radius;
         driver.lastLineWidth = (CGFloat)lineWidth;
     } @catch (NSException *exception) {
         axs_ring_log(@"ring sync exception: %@", exception);
     }
 }
 
-// --- 挂载 / 摘除（成员扫描触发） ----------------------------------------------
+// --- attach / detach（成员扫描触发） ------------------------------------------
 
 static void axs_ring_attachContainer(UIView *container) {
     NSString *key = [NSString stringWithFormat:@"%p", container];
@@ -414,7 +331,6 @@ static void axs_ring_attachContainer(UIView *container) {
     ring.mask = shape;
 
     CAGradientLayer *grad = axs_ring_makeGradient(axs_ring_customColor(), axs_ring_color());
-    grad.name = AXS_RING_GRADIENT_NAME;
     [ring addSublayer:grad];
     [container.layer addSublayer:ring];      // 宿主容器图层最上层
 
@@ -424,39 +340,47 @@ static void axs_ring_attachContainer(UIView *container) {
     driver.shape = shape;
     driver.gradient = grad;
     driver.overlay = axs_ring_findOverlay(container);
-    driver.lastRect = CGRectZero;
-    driver.lastRingBounds = CGRectZero;
-    driver.lastLineWidth = -1;
-    driver.lastRadius = -1;
+
+    // TXT 二.2：掩码选择——只保留整框 mask（bbox = 容器 + 43.18pt 外边距），
+    // 跳过角区/边条局部 mask；命中即缓存为半径来源（逐帧重读它的当前 path）
+    UIView *overlay = driver.overlay;
+    CGFloat expandedW = container.bounds.size.width + 43.18;
+    CGFloat expandedH = container.bounds.size.height + 43.18;
+    NSMutableArray<CAShapeLayer *> *masks = [NSMutableArray array];
+    if (overlay != nil) axs_ring_collectMasks(overlay, 0, masks);
+    axs_ring_collectMasks(container, 0, masks);
+    for (CAShapeLayer *m in masks) {
+        if (m.path == nil) continue;
+        CGRect bb = CGPathGetBoundingBox(m.path);
+        if (fabs(bb.size.width - expandedW) < 8 && fabs(bb.size.height - expandedH) < 8) {
+            driver.radiusMask = m;
+            break;
+        }
+    }
 
     driver.link = [CADisplayLink displayLinkWithTarget:driver selector:@selector(tick)];
     [driver.link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     axs_ring_drivers[key] = driver;
 
-    // 首帧即出几何（含一次性层级/遮罩 probe 留档）
+    // 首帧即出几何（含一次性 probe 留档：候选类/bbox/半径）
     axs_ring_syncDriver(driver);
 
-    // 一次性 probe：容器 + 子树遮罩候选（TXT 七.1 诊断留档）
-    axs_ring_log(@"ring probe: container class=%@ frame=%@ bounds=%@ layerCorner=%.2f masksToBounds=%d",
-                 NSStringFromClass(container.class), NSStringFromCGRect(container.frame),
-                 NSStringFromCGRect(container.bounds),
-                 container.layer.cornerRadius, container.layer.masksToBounds ? 1 : 0);
-    NSMutableArray *candidates = [NSMutableArray array];
-    axs_ring_collectMaskInfos(container.layer, container.layer, 0, candidates, ring);
-    if (driver.overlay != nil) {
-        axs_ring_collectIvarMasks(driver.overlay, 0, candidates, container.layer, ring);
-    }
-    for (AXSRingMaskCandidate *c in candidates) {
-        axs_ring_log(@"ring probe: mask class=%@ path=%@ radius=%.1f",
-                     NSStringFromClass(c.maskLayer.class),
-                     NSStringFromCGRect(c.rect), c.radius);
+    axs_ring_log(@"ring probe: container class=%@ bounds=%@ masks=%lu",
+                 NSStringFromClass(container.class), NSStringFromCGRect(container.bounds),
+                 (unsigned long)masks.count);
+    for (CAShapeLayer *m in masks) {
+        if (m.path == nil) continue;
+        axs_ring_log(@"ring probe: mask class=%@ bbox=%@ radius=%.1f",
+                     NSStringFromClass(m.class), NSStringFromCGRect(CGPathGetBoundingBox(m.path)),
+                     axs_ring_radiusFromPath(m.path));
     }
 
     if (!driver.loggedAttach) {
         driver.loggedAttach = YES;
-        axs_ring_log(@"ring attach: scan container=%p containerLayer=%p bounds=%@ radiusSource=%@ radius=%.1f",
+        axs_ring_log(@"ring attach: scan container=%p containerLayer=%p bounds=%@ radiusSource=%@ radius=%.1f mask=%@",
                      container, container.layer, NSStringFromCGRect(container.layer.bounds),
-                     driver.radiusSource ?: @"none", driver.lastRadius);
+                     driver.radiusSource ?: @"none", driver.lastRadius,
+                     driver.radiusMask ? NSStringFromClass(driver.radiusMask.class) : @"none");
     }
 }
 
@@ -473,7 +397,7 @@ static void axs_ring_detachDriver(NSString *key) {
 // --- 成员扫描（0.5s 定时器 + 窗口通知；只做集合对比，不做几何） ----------------
 
 static void axs_ring_collectContainers(UIView *view, NSMutableArray *out, int depth) {
-    if (view == nil || depth > AXS_RING_MAX_DEPTH) return;
+    if (view == nil || depth > 6) return;
     Class containerClass = objc_getClass("SCFloatingContainerView");
     if (containerClass != nil && [view isKindOfClass:containerClass]
         && view.window != nil && view.alpha > 0.01) {
