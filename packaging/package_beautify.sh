@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="2.0.5+beautify.22"
+VERSION="2.0.5+beautify.23"
 BASE_DEB="base/com.susudear.screencore_2.0.5+holdpress.1.deb"
 OUT="out"
 PKG="$OUT/pkg"
@@ -49,7 +49,7 @@ SIZE=$(find "$PKG" -type f -not -path "*/DEBIAN/*" -exec stat -f%z {} + | awk '{
     echo "Package: com.susudear.screencore"
     echo "Name: ScreenCore"
     echo "Description: 分屏而已"
-    echo " 环改挂真实裁剪层（clips+cornerRadius 层），每帧读其 presentation 矩形；layoutSubviews 钩子内以模型值同 commit 同步，右/下边跟随不再滞后一帧；弹簧由 displayLink 走 presentation。"
+    echo " 环挂非裁剪祖先层（不再挂 clips 层，描边完整可见、置最上层）；几何取真实裁剪层 presentation 经 convertRect 换算；layoutSubviews 同 commit 同步修右/下滞后；弹簧走 displayLink。"
     echo "Maintainer: SuSu"
     echo "Author: SuSu"
     echo "Icon: https://repo.susubaby.cn/icons/ScreenCore.png"
@@ -98,7 +98,7 @@ check "dylib has scan detach log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dy
 check "dylib has displayLink driver" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'AXSRingLinkDriver'"
 check "dylib has whole-frame mask probe" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring probe: mask class=%@ bbox=%@ radius=%.1f'"
 check "dylib has radius conversion attach fields" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'rRing=%.1f source=%@ curve=%@'"
-check "dylib has mount layer attach fields" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'mountBounds=%@ corner=%.1f'"
+check "dylib has mount layer attach fields" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'realFrame=%@ convRect=%@ corner=%.1f'"
 check "dylib has real clip finder" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'realCorner'"
 check "dylib has layout hook install log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring layout hook installed on SCFloatingContainerView'"
 check "dylib has tree probe" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring tree: window=%@ frame=%@ bounds=%@'"

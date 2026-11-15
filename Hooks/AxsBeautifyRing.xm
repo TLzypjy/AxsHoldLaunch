@@ -239,7 +239,8 @@ static void axs_ring_syncDriver(AXSRingLinkDriver *driver);
 @property (nonatomic, strong) CAShapeLayer *shape;      // ring.mask
 @property (nonatomic, weak) CAShapeLayer *radiusMask;   // 整框 overlay mask（兜底半径来源）
 @property (nonatomic, weak) UIView *overlay;            // SCFloatingInteractionOverlayView
-@property (nonatomic, weak) CALayer *realLayer;         // 真实裁剪层（bbox≈容器 bounds）
+@property (nonatomic, weak) CALayer *realLayer;         // 真实裁剪层（bbox≈容器 bounds，几何源）
+@property (nonatomic, weak) CALayer *mountLayer;        // 挂载层（非裁剪祖先，masksToBounds=0）
 @property (nonatomic, assign) CGFloat overlayR;         // overlay mask 当前半径（对照日志）
 @property (nonatomic, assign) CGRect lastBounds;        // 上帧应用的 presentation bounds
 @property (nonatomic, assign) CGFloat lastRadius;       // 上帧应用的环圆角
@@ -328,6 +329,19 @@ static BOOL axs_ring_findRealClip(AXSRingLinkDriver *driver, UIView *container) 
     return (best != nil);
 }
 
+// 挂载层查找（TXT beautify.23 二.1）：容器层自身优先；它也 clips=1 就沿
+// superlayer 链向上找第一个 masksToBounds=0 的层，兜底回容器层。
+// 裁剪层只提供圆角与几何，不能当环的父层（贴边描边会被切掉）。
+static CALayer *axs_ring_findMount(UIView *container) {
+    CALayer *l = container.layer;
+    int hops = 0;
+    while (l != nil && l.masksToBounds && hops < 8) {
+        l = l.superlayer;
+        hops++;
+    }
+    return l ?: container.layer;
+}
+
 // 全树一次性探针（TXT beautify.21 二）：从容器所在 window 的 layer 树递归
 // 遍历，记录 SC*/_UI*/裁剪层的几何、cornerRadius、mask bbox/半径，定位
 // 真实圆角来源；进程内只跑一次，不每帧写日志。
@@ -389,24 +403,33 @@ static void axs_ring_syncDriver2(AXSRingLinkDriver *driver, BOOL preferModel) {
         double lineWidth = axs_ring_thickness();
         if (lineWidth < 0.5) lineWidth = 0.5;
 
-        CALayer *mount = driver.realLayer ?: container.layer;
-        // 真实裁剪层是后来才定位到的情形：把环迁挂过去（TXT beautify.22 二.1）
+        // 挂载层：非裁剪祖先（masksToBounds=0）——环挂进裁剪层会被自身圆角
+        // mask 切到不可见（TXT beautify.23 二.1）；addSublayer 即置最上层（二.3）
+        CALayer *mount = axs_ring_findMount(container);
+        driver.mountLayer = mount;
         if (driver.ring.superlayer != mount) {
             [driver.ring removeFromSuperlayer];
             [mount addSublayer:driver.ring];
         }
 
-        // 几何源：右/下边 = 原点+尺寸，必须取挂载层的实时矩形，不能只刷宽高
+        // 几何源仍是真实裁剪层：presentation frame 经 convertRect:fromLayer:
+        // 换算到挂载层坐标（TXT beautify.23 二.2）；右/下终点 = 换算后 origin+size
+        CALayer *src = driver.realLayer ?: mount;
         CGRect bounds;
         if (preferModel) {
-            if ([mount animationForKey:@"bounds"] != nil
-                || [mount animationForKey:@"position"] != nil) {
+            if ([src animationForKey:@"bounds"] != nil
+                || [src animationForKey:@"position"] != nil) {
                 return;                          // 弹簧动画进行中：displayLink 按 presentation 跟
             }
-            bounds = mount.bounds;
+            bounds = [mount convertRect:src.frame fromLayer:src];
         } else {
-            CALayer *pres = mount.presentationLayer;   // 视觉矩形，静止时 == model
-            bounds = (pres != nil) ? pres.bounds : mount.bounds;
+            CALayer *pres = src.presentationLayer;     // 视觉矩形，静止时 == model
+            CALayer *mp = mount.presentationLayer;
+            if (pres != nil && mp != nil) {
+                bounds = [mp convertRect:pres.frame fromLayer:pres];
+            } else {
+                bounds = [mount convertRect:src.frame fromLayer:src];
+            }
         }
         if (bounds.size.width < 20 || bounds.size.height < 20) return;
 
@@ -501,17 +524,19 @@ static void axs_ring_attachContainer(UIView *container) {
     driver.container = container;
     driver.overlay = axs_ring_findOverlay(container);
 
-    // 先定位真实裁剪层（环的挂载层 + 圆角来源），再选整框 overlay mask 作
-    // 兜底/对照（此刻环尚未入树，无需跳过 ownRing）；未命中不落 radius=-1
+    // 先定位真实裁剪层（几何源+圆角来源）与非裁剪挂载层，再选整框 overlay
+    // mask 作兜底/对照（此刻环尚未入树，无需跳过 ownRing）；未命中不落 -1
     axs_ring_selectMask(driver, container);
     axs_ring_findRealClip(driver, container);
-    CALayer *mount = driver.realLayer ?: container.layer;
+    CALayer *mount = axs_ring_findMount(container);
+    driver.mountLayer = mount;
+    CALayer *src = driver.realLayer;
 
     CALayer *ring = [CALayer layer];
     ring.name = AXS_RING_LAYER_NAME;
-    ring.frame = mount.bounds;
+    // 初始矩形 = 真实裁剪层换算到挂载层坐标（TXT beautify.23 二.2）
+    ring.frame = (src != nil) ? [mount convertRect:src.frame fromLayer:src] : mount.bounds;
     ring.masksToBounds = NO;
-    // 环随挂载层原点 (0,0) 对齐，不另设偏移（TXT beautify.22 二.3）
 
     CAShapeLayer *shape = [CAShapeLayer layer];
     shape.fillColor = nil;                   // 只当遮罩用
@@ -520,7 +545,7 @@ static void axs_ring_attachContainer(UIView *container) {
 
     CAGradientLayer *grad = axs_ring_makeGradient(axs_ring_customColor(), axs_ring_color());
     [ring addSublayer:grad];
-    [mount addSublayer:ring];                // 挂真实裁剪层（TXT beautify.22 二.1）
+    [mount addSublayer:ring];                // 挂非裁剪祖先层，置最上层（TXT 二.1/二.3）
 
     driver.ring = ring;
     driver.shape = shape;
@@ -555,14 +580,17 @@ static void axs_ring_attachContainer(UIView *container) {
     if (!driver.loggedAttach) {
         driver.loggedAttach = YES;
         NSString *curve = @"n/a";
-        if (mount != nil && [mount respondsToSelector:@selector(cornerCurve)]) {
-            NSString *c = [(id)mount cornerCurve];
+        if (src != nil && [src respondsToSelector:@selector(cornerCurve)]) {
+            NSString *c = [(id)src cornerCurve];
             if ([c isKindOfClass:[NSString class]]) curve = c;
         }
-        axs_ring_log(@"ring attach: scan container=%p mount=%@ mountFrame=%@ mountBounds=%@ corner=%.1f overlayR=%.1f rRing=%.1f source=%@ curve=%@",
+        axs_ring_log(@"ring attach: scan container=%p mount=%@ mountClips=%d realFrame=%@ convRect=%@ corner=%.1f overlayR=%.1f rRing=%.1f source=%@ curve=%@",
                      container, NSStringFromClass(mount.class),
-                     NSStringFromCGRect(mount.frame), NSStringFromCGRect(mount.bounds),
-                     mount.cornerRadius, driver.overlayR, driver.lastRadius,
+                     mount.masksToBounds ? 1 : 0,
+                     NSStringFromCGRect(src ? src.frame : CGRectZero),
+                     NSStringFromCGRect(driver.lastBounds),
+                     (src != nil) ? src.cornerRadius : 0.0,
+                     driver.overlayR, driver.lastRadius,
                      driver.radiusSource ?: @"config", curve);
     }
 }
