@@ -142,10 +142,11 @@ static CAGradientLayer *axs_ring_makeGradient(BOOL custom, UIColor *color) {
         grad.colors = colors;
         grad.locations = locations;
 
-        // 跑马灯 = 渐变层线性旋转 0→2π：首尾旋转值同角无缝，色环整体连续流动；
-        // colors 数组只设一次（不再做关键帧轮转，消除首尾接缝与双红段）。
-        // 环形遮罩在父层 ring.mask 上，旋转渐变子层不影响环形状
-        CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation"];
+        // 跑马灯 = 渐变层线性旋转 0→2π（TXT beautify.25 四.1）：
+        // 首尾旋转值同角无缝，色环整体连续流动；colors 数组静态闭合，
+        // 不做任何关键帧/位移动画（四.3）。环遮罩在父层 ring.mask 上，
+        // 旋转渐变子层不影响环形状
+        CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
         spin.fromValue = @0.0;
         spin.toValue = @(M_PI * 2.0);
         spin.duration = 4.0;
@@ -495,7 +496,15 @@ static void axs_ring_syncDriver2(AXSRingLinkDriver *driver, BOOL preferModel) {
         UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:pathRadius];
         driver.shape.path = p.CGPath;
         driver.shape.lineWidth = lineWidth;      // 描边宽度 = 配置值（固定屏幕点）
-        driver.gradient.frame = driver.ring.bounds;
+        // 渐变层铺对角线边长的居中正方形（TXT beautify.25 三.2）：长方形一转
+        // 就盖不住整框（.24 断段根因），正方形任意旋转角都完整覆盖，conic
+        // 圆心=环心不变，超出部分由 ring.mask 描边裁掉
+        {
+            CGFloat w = driver.ring.bounds.size.width;
+            CGFloat h = driver.ring.bounds.size.height;
+            CGFloat diag = (CGFloat)sqrt((double)w * w + (double)h * h) + 2.0;
+            driver.gradient.frame = CGRectMake((w - diag) / 2.0, (h - diag) / 2.0, diag, diag);
+        }
         [CATransaction commit];
 
         driver.lastBounds = bounds;

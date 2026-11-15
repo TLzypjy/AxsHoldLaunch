@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="2.0.5+beautify.24"
+VERSION="2.0.5+beautify.25"
 BASE_DEB="base/com.susudear.screencore_2.0.5+holdpress.1.deb"
 OUT="out"
 PKG="$OUT/pkg"
@@ -49,7 +49,7 @@ SIZE=$(find "$PKG" -type f -not -path "*/DEBIAN/*" -exec stat -f%z {} + | awk '{
     echo "Package: com.susudear.screencore"
     echo "Name: ScreenCore"
     echo "Description: 分屏而已"
-    echo " 消除 conic 首尾接缝：HSB 色相均分闭环取色（首尾同色收口），跑马灯改渐变层 0→2π 线性无限旋转；自定义色为纯色无动画；挂载/几何/圆角结构不动。"
+    echo " 跑马灯断段修复：渐变层铺对角线正方形（任意旋转角都盖住整框，conic 圆心=环心），仅渐变层 0→2π 线性旋转，colors 静态闭环；路径与几何不动。"
     echo "Maintainer: SuSu"
     echo "Author: SuSu"
     echo "Icon: https://repo.susubaby.cn/icons/ScreenCore.png"
@@ -103,7 +103,7 @@ check "dylib has real clip finder" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.d
 check "dylib has layout hook install log" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring layout hook installed on SCFloatingContainerView'"
 check "dylib has tree probe" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'ring tree: window=%@ frame=%@ bounds=%@'"
 check "dylib has no AXSRingFrame class" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'AXSRingFrame') -eq 0"
-check "dylib has rotation marquee" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'transform.rotation'"
+check "dylib has rotation marquee (z keypath)" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'transform.rotation.z'"
 check "dylib has no fullscreen selectors" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -Ec 'sc_handleFullscreenTap|sc_floatingContainerViewDidRequestFullscreen|promoteSceneToFullscreen') -eq 0"
 check "dylib has holdpress log in Documents" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'Documents/AxsHoldLaunch.log'"
 check "dylib has no Caches log path left" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'Caches/AxsHoldLaunch.log') -eq 0"
