@@ -209,6 +209,10 @@ static CGFloat axs_ring_radiusFromPath(CGPathRef path) {
 @property (nonatomic, assign) CGFloat lastRadius;
 @property (nonatomic, assign) CGFloat lastLineWidth;
 @property (nonatomic, assign) BOOL loggedAttach;
+// TXT 四.1：圆角基准持久保存（attach 时从 overlayMask 解析），每帧按宽度比例换算
+@property (nonatomic, assign) CGFloat maskRadius;       // overlayMask 圆角
+@property (nonatomic, assign) CGFloat maskWidth;        // mask 路径基准宽度
+@property (nonatomic, copy) NSString *radiusSource;     // overlayMask|config
 - (void)tick;
 @end
 
@@ -247,15 +251,35 @@ static void axs_ring_syncContainer(UIView *container, AXSRingLinkDriver *driver)
         CGRect bounds = (pres != nil) ? pres.bounds : container.layer.bounds;
         if (bounds.size.width < 20 || bounds.size.height < 20) return;
 
-        // 圆角：interaction overlay 的 CAShapeLayer mask 路径——ScreenCore
-        // 在弹簧期间自己持续更新它，逐帧读即是当前真实圆角
+        // 圆角（TXT 四.3）：基准 = attach 时解析的 maskRadius，按当前宽度比例
+        // 换算；每帧尝试重新枚举 overlay 的 mask 刷新基准，枚举失败沿用缓存；
+        // 任何路径下圆角不得为 0（0 = 直角）
         UIView *overlay = driver.overlay ?: axs_ring_findOverlay(container);
         driver.overlay = overlay;
-        CGFloat radius = driver.lastRadius;
-        if (overlay != nil && [overlay.layer.mask isKindOfClass:[CAShapeLayer class]]) {
-            CGFloat r = axs_ring_radiusFromPath(((CAShapeLayer *)overlay.layer.mask).path);
-            if (r > 0.5) radius = r;
+        if (overlay != nil) {
+            NSMutableArray<CAShapeLayer *> *masks = [NSMutableArray array];
+            axs_ring_collectMasks(overlay, 0, masks);
+            CGFloat expandedW = container.layer.bounds.size.width + 43.18;
+            CGFloat expandedH = container.layer.bounds.size.height + 43.18;
+            for (CAShapeLayer *m in masks) {
+                if (m.path == nil) continue;
+                CGRect bb = CGPathGetBoundingBox(m.path);
+                if (fabs(bb.size.width - expandedW) < 24 && fabs(bb.size.height - expandedH) < 24) {
+                    CGFloat r = axs_ring_radiusFromPath(m.path);
+                    if (r > 0.5) {
+                        driver.maskRadius = r;
+                        driver.maskWidth = bb.size.width;
+                        driver.radiusSource = @"overlayMask";
+                    }
+                    break;
+                }
+            }
         }
+        CGFloat radius = driver.lastRadius;
+        if (driver.maskRadius > 0.5 && driver.maskWidth > 0.5) {
+            radius = driver.maskRadius * (CGFloat)(bounds.size.width / driver.maskWidth);
+        }
+        if (radius < 1.0) radius = (driver.lastRadius > 0.5) ? driver.lastRadius : (CGFloat)axs_ring_configRadius();
 
         BOOL changed = !CGRectEqualToRect(bounds, driver.lastBounds)
                     || fabs(driver.lastRadius - radius) > 0.05
@@ -267,7 +291,7 @@ static void axs_ring_syncContainer(UIView *container, AXSRingLinkDriver *driver)
         driver.ring.frame = bounds;              // ringContainer.frame = 容器 bounds
         driver.shape.frame = driver.ring.bounds;
         CGRect r = CGRectInset(driver.ring.bounds, lineWidth / 2.0, lineWidth / 2.0);
-        double pathRadius = axs_ring_clamp(radius, 0.0, MIN(r.size.width, r.size.height) / 2.0);
+        double pathRadius = axs_ring_clamp(radius, 1.0, MAX(MIN(r.size.width, r.size.height) / 2.0, 1.0));
         UIBezierPath *p = [UIBezierPath bezierPathWithRoundedRect:r cornerRadius:pathRadius];
         driver.shape.path = p.CGPath;
         driver.shape.lineWidth = lineWidth;      // 描边宽度 = 配置值（固定屏幕点）
@@ -311,13 +335,44 @@ static void axs_ring_attachContainer(UIView *container) {
     driver.gradient = grad;
     driver.lastRadius = -1;
     driver.lastLineWidth = -1;
+    driver.overlay = axs_ring_findOverlay(container);
+
+    // TXT 四.2：圆角来源——枚举 overlay/region 视图的 CAShapeLayer mask，
+    // 选与容器几何（含 21.59pt 外边距）一致者；取不到才回退 config。
+    // maskRadius/maskWidth 持久保存，每帧按宽度比例换算。
+    CGFloat expandedW = container.bounds.size.width + 43.18;  // 2 × 21.59pt 外边距
+    CGFloat expandedH = container.bounds.size.height + 43.18;
+    NSMutableArray<CAShapeLayer *> *masks = [NSMutableArray array];
+    if (driver.overlay != nil) axs_ring_collectMasks(driver.overlay, 0, masks);
+    axs_ring_collectMasks(container, 0, masks);
+    for (CAShapeLayer *m in masks) {
+        if (m.path == nil) continue;
+        CGRect bb = CGPathGetBoundingBox(m.path);
+        if (fabs(bb.size.width - expandedW) < 24 && fabs(bb.size.height - expandedH) < 24) {
+            CGFloat r = axs_ring_radiusFromPath(m.path);
+            if (r > 0.5) {
+                driver.maskRadius = r;
+                driver.maskWidth = bb.size.width;
+                driver.radiusSource = @"overlayMask";
+                break;
+            }
+        }
+    }
+    if (driver.maskRadius < 0.5) {
+        driver.maskRadius = (CGFloat)axs_ring_configRadius();
+        driver.maskWidth = container.bounds.size.width;
+        driver.radiusSource = @"config";
+    }
 
     driver.link = [CADisplayLink displayLinkWithTarget:driver selector:@selector(tick)];
     [driver.link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     axs_ring_drivers[key] = driver;
 
-    axs_ring_log(@"ring attach: scan container=%p containerLayer=%p bounds=%@",
-                 container, container.layer, NSStringFromCGRect(container.layer.bounds));
+    axs_ring_syncContainer(container, driver); // 首帧即出正确几何（含圆角）
+
+    axs_ring_log(@"ring attach: scan container=%p containerLayer=%p bounds=%@ radiusSource=%@ radius=%.1f",
+                 container, container.layer, NSStringFromCGRect(container.layer.bounds),
+                 driver.radiusSource, driver.maskRadius);
 }
 
 static void axs_ring_detachDriver(NSString *key) {
