@@ -193,19 +193,25 @@ static double axs_holdlaunch_quantizeThreshold(double value) {
 static UIColor *axs_holdlaunch_hexToColor(NSString *hex, UIColor *fallback) {
     if (![hex isKindOfClass:[NSString class]] || hex.length == 0) return fallback;
     NSString *h = [[hex stringByReplacingOccurrencesOfString:@"#" withString:@""] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    if (h.length != 6) return fallback;
+    if (h.length != 6 && h.length != 8) return fallback;
     unsigned int v = 0;
     NSScanner *scanner = [NSScanner scannerWithString:h];
     [scanner scanHexInt:&v];
-    return [UIColor colorWithRed:((v >> 16) & 0xFF) / 255.0
-                           green:((v >> 8) & 0xFF) / 255.0
-                            blue:(v & 0xFF) / 255.0
-                           alpha:1.0];
+    if (h.length == 6) v = (v << 8) | 0xFFu;     // #RRGGBB → alpha=1
+    return [UIColor colorWithRed:((v >> 24) & 0xFF) / 255.0
+                           green:((v >> 16) & 0xFF) / 255.0
+                            blue:((v >> 8) & 0xFF) / 255.0
+                           alpha:(v & 0xFF) / 255.0];
 }
 
 static NSString *axs_holdlaunch_colorToHex(UIColor *color) {
     CGFloat r = 0, g = 0, b = 0, a = 0;
     if (![color getRed:&r green:&g blue:&b alpha:&a]) return @"#FFFFFF";
+    if (a < 0.999) {
+        // 带 alpha 写 #RRGGBBAA（TXT beautify.26 二.3）
+        return [NSString stringWithFormat:@"#%02X%02X%02X%02X",
+                (int)round(r * 255), (int)round(g * 255), (int)round(b * 255), (int)round(a * 255)];
+    }
     return [NSString stringWithFormat:@"#%02X%02X%02X",
             (int)round(r * 255), (int)round(g * 255), (int)round(b * 255)];
 }
@@ -233,7 +239,7 @@ static void axs_holdlaunch_presentColorPicker(id self, NSString *title, NSString
     if (!objc_getClass("UIColorPickerViewController")) return;
     UIViewController *picker = [[objc_getClass("UIColorPickerViewController") alloc] init];
     if ([picker respondsToSelector:@selector(setSupportsAlpha:)]) {
-        ((void(*)(id, SEL, BOOL))objc_msgSend)(picker, @selector(setSupportsAlpha:), NO);
+        ((void(*)(id, SEL, BOOL))objc_msgSend)(picker, @selector(setSupportsAlpha:), YES);
     }
     if ([picker respondsToSelector:@selector(setInitialColor:)]) {
         // ring/glow colors live in ScreenCore's own domain
@@ -330,27 +336,16 @@ static BOOL axs_ring_page_isColorKey(NSString *key) {
         || [key isEqualToString:AxsHoldLaunchKeyBeautifyGlowColor];
 }
 
-// 美化分组的颜色行本轮只做显示：点按弹提示，不接颜色选择器、不写配置。
-static BOOL axs_ring_page_isBeautifyColorKey(NSString *key) {
-    return [key isEqualToString:AxsHoldLaunchKeyBeautifyRingColor]
-        || [key isEqualToString:AxsHoldLaunchKeyBeautifyGlowColor];
-}
-
-static void axs_holdlaunch_presentNotImplementedAlert(id self) {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示"
-                                                                   message:@"该功能尚未实现"
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"确定"
-                                              style:UIAlertActionStyleDefault
-                                            handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
+// 美化分组的颜色行本轮起接通系统取色器（TXT beautify.26 二）：
+// 点按/点色块都弹 UIColorPickerViewController，选色写回配置。
 
 static NSString *axs_ring_page_colorTitle(id self, NSString *key) {
     NSString *labelKey = nil;
     if ([key isEqualToString:AxsHoldLaunchKeyRingColor]) labelKey = @"RING_FRAME_COLOR";
     else if ([key isEqualToString:AxsHoldLaunchKeyGlowColor]) labelKey = @"RING_GLOW_COLOR";
     else if ([key isEqualToString:AxsHoldLaunchKeyInnerColor]) labelKey = @"RING_INNER_COLOR";
+    else if ([key isEqualToString:AxsHoldLaunchKeyBeautifyRingColor]) labelKey = @"BEAUTIFY_RING_FRAME_COLOR";
+    else if ([key isEqualToString:AxsHoldLaunchKeyBeautifyGlowColor]) labelKey = @"BEAUTIFY_GLOW_COLOR";
     NSString *title = axs_ring_page_localized(self, labelKey);
     if ([title isEqualToString:labelKey]) title = key;
     return title;
@@ -647,10 +642,7 @@ static void axs_ringPage_didSelect_imp(id self, SEL _cmd, id tableView, id index
         }
         NSString *key = [spec propertyForKey:@"key"];
         if (axs_ring_page_isColorKey(key)) {
-            if (axs_ring_page_isBeautifyColorKey(key)) {
-                axs_holdlaunch_presentNotImplementedAlert(self);
-                return;
-            }
+            // 全部颜色行（含美化分组）接通取色器（TXT beautify.26 二.1）
             axs_holdlaunch_presentColorPicker(self, axs_ring_page_colorTitle(self, key), key);
             return;
         }
@@ -698,10 +690,6 @@ static void axs_ringPage_plus_imp(id self, SEL _cmd, UIButton *sender) {
 static void axs_ringPage_colorTapped_imp(id self, SEL _cmd, UIButton *sender) {
     NSString *key = objc_getAssociatedObject(sender, @selector(axsRingColorKey));
     if (key.length == 0) return;
-    if (axs_ring_page_isBeautifyColorKey(key)) {
-        axs_holdlaunch_presentNotImplementedAlert(self);
-        return;
-    }
     axs_holdlaunch_presentColorPicker(self, axs_ring_page_colorTitle(self, key), key);
 }
 
