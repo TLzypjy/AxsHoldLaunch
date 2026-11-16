@@ -75,8 +75,9 @@ static double axs_ring_thickness(void) {
 }
 
 static BOOL axs_ring_customColor(void) {
-    id v = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:@"splitBeautifyRingCustomColorEnabled" defaultValue:@NO];
-    return [v isKindOfClass:[NSNumber class]] ? [v boolValue] : NO;
+    // 面板开关默认 YES（plist），渲染侧同默认闭环：未写入时按单色走
+    id v = [[AxsHoldLaunchConfig axs_holdlaunch_shared] axs_holdlaunch_theirValueForKey:@"splitBeautifyRingCustomColorEnabled" defaultValue:@YES];
+    return [v isKindOfClass:[NSNumber class]] ? [v boolValue] : YES;
 }
 
 static double axs_ring_configRadius(void) {
@@ -726,10 +727,27 @@ static NSTimer *axs_ring_scanTimer = nil;
 
 static AXSRingHealthTarget *axs_ring_healthTarget = nil;
 
-// Darwin 通知：设置保存后立即重扫（0.5s 定时器兜底）
+// 偏好变更后刷新已有存活环的颜色（TXT beautify.26 三.4）：重建渐变层
+// （自定义单色 ↔ 彩虹跑马灯互切），挂载/几何/圆角结构不动，环不断
+static void axs_ring_refreshAppearance(void) {
+    for (AXSRingLinkDriver *d in axs_ring_drivers) {
+        if (d.ring == nil) continue;
+        CAGradientLayer *old = d.gradient;
+        CAGradientLayer *g = axs_ring_makeGradient(axs_ring_customColor(), axs_ring_color());
+        g.frame = (old != nil) ? old.frame : d.ring.bounds;
+        [d.ring insertSublayer:g atIndex:0];
+        [old removeFromSuperlayer];          // 旧层连同旧动画一起移除
+        d.gradient = g;
+    }
+}
+
+// Darwin 通知：设置保存后立即重扫 + 刷新颜色（0.5s 定时器兜底）
 static void axs_ring_prefsChanged(CFNotificationCenterRef center, void *observer,
                                   CFStringRef name, const void *object, CFDictionaryRef info) {
-    dispatch_async(dispatch_get_main_queue(), ^{ axs_ring_scanTick(); });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        axs_ring_scanTick();
+        axs_ring_refreshAppearance();
+    });
 }
 
 // --- entry: 启动即挂定时器与通知（无任何 hook） --------------------------------

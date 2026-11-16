@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-VERSION="2.0.5+beautify.25"
+VERSION="2.0.5+beautify.26"
 BASE_DEB="base/com.susudear.screencore_2.0.5+holdpress.1.deb"
 OUT="out"
 PKG="$OUT/pkg"
@@ -49,7 +49,7 @@ SIZE=$(find "$PKG" -type f -not -path "*/DEBIAN/*" -exec stat -f%z {} + | awk '{
     echo "Package: com.susudear.screencore"
     echo "Name: ScreenCore"
     echo "Description: 分屏而已"
-    echo " 跑马灯断段修复：渐变层铺对角线正方形（任意旋转角都盖住整框，conic 圆心=环心），仅渐变层 0→2π 线性旋转，colors 静态闭环；路径与几何不动。"
+    echo " 接通光圈自定义取色：颜色行/色块点击打开系统取色器（支持 alpha，写回 #RRGGBB(AA) 即时刷新存活环）；自定义开关 ON=所选单色，OFF=彩虹跑马灯。"
     echo "Maintainer: SuSu"
     echo "Author: SuSu"
     echo "Icon: https://repo.susubaby.cn/icons/ScreenCore.png"
@@ -82,8 +82,8 @@ check "plist has beautify sliders" sh -c "plutil -p '$BUNDLE/SplitSettings.plist
 check "zh strings localized" sh -c "plutil -p '$BUNDLE/zh-Hans.lproj/SplitSettings.strings' | grep -q '美化'"
 check "en strings localized" sh -c "plutil -p '$BUNDLE/en.lproj/SplitSettings.strings' | grep -q 'Beautify'"
 check "dylib has beautify color key" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'splitBeautifyRingFrameColor'"
-# the alert literal is compiled as UTF-16LE (__ustring), so grep its hex
-check "dylib has alert message" sh -c "xxd -p '$DYLIB_DIR/AxsHoldLaunch.dylib' | tr -d '\n' | grep -q 'e58b9f52fd801a5c2a679e5bb073'"
+check "dylib has color picker" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'UIColorPickerViewController'"
+check "dylib has picker finish handler" sh -c "strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -q 'colorPickerControllerDidFinish:'"
 check "dylib has no overlay engine marker" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'ring engine start') -eq 0"
 check "dylib has no overlay window marker" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'ring window frame') -eq 0"
 check "dylib has no overlay window class" sh -c "test \$(strings -a '$DYLIB_DIR/AxsHoldLaunch.dylib' | grep -c 'AXSRingOverlayWindow') -eq 0"
