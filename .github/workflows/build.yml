@@ -27,7 +27,7 @@ jobs:
         include:
           # - build_variant: rootful
           - build_variant: rootless
-          # - build_variant: roothide   # TEMP: runner keep cancelling rootless; restore after build
+          - build_variant: roothide
 
     steps:
       - name: Checkout
